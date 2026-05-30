@@ -1,4 +1,4 @@
-//! Command-line interface (clap derive). Refined in Phase 9.
+//! Command-line interface (clap derive).
 
 use clap::{Parser, Subcommand};
 
@@ -95,9 +95,9 @@ mod tests {
         assert_eq!(max_dead_ratio, Some(0.15));
     }
 
-    /// Defaults match the documented PLAN values.
+    /// Defaults match the documented values.
     #[test]
-    fn defaults_match_plan() {
+    fn defaults_match_documented() {
         let cli = Cli::try_parse_from(["dead-poets", "scan"]).unwrap();
         let Commands::Scan {
             path,

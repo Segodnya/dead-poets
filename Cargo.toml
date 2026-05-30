@@ -40,7 +40,7 @@ regex = "1.12.3"
 serde = { version = "1.0.228", features = ["derive"] }
 toml = "1.1.2"
 # tree-sitter family pinned exactly: grammar crates have had ABI breaks across
-# releases, so we lock the validated ABI-compatible set (PLAN Addendum 2 §6).
+# releases, so we lock the validated ABI-compatible set.
 tree-sitter = "=0.26.9"
 tree-sitter-javascript = "=0.25.0"
 tree-sitter-php = "=0.24.2"

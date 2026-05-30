@@ -1,5 +1,4 @@
-//! Literal decoding — the single "plain literal vs guard" decision point
-//! (PLAN Addendum 2 §4).
+//! Literal decoding — the single "plain literal vs guard" decision point.
 //!
 //! Turns a source string token (quotes included) into its **canonical runtime
 //! string**, or reports it as *dynamic* (interpolated) so the caller routes it
@@ -28,7 +27,7 @@ pub enum Decoded {
     /// Goes into the literal set.
     Literal(String),
     /// The token contains interpolation; it is not a plain literal and must be
-    /// routed to the guard layer (Phase 4) for static-fragment extraction.
+    /// routed to the guard layer for static-fragment extraction.
     Dynamic,
 }
 

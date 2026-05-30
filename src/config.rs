@@ -1,9 +1,9 @@
 //! Configuration model (`dead-poets.toml`).
 //!
-//! Everything project-specific lives here, never in code (PLAN: "general crate,
-//! repo as testbed"). The schema must be expressive enough to describe a project
-//! like `example_repo` without code changes — hence the generalized `[[calls]]`
-//! model (function / method+receiver / filter).
+//! Everything project-specific lives here, never in code: the engine is a
+//! general crate, any repo its testbed. The schema must be expressive enough to
+//! describe a project like `example_repo` without code changes — hence the
+//! generalized `[[calls]]` model (function / method+receiver / filter).
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -36,7 +36,7 @@ pub struct Scan {
     /// Extra directories to ignore (on top of `.gitignore`).
     pub ignore_dirs: Vec<String>,
     /// Source roots. Always a list, even for a single root, so multi-repo
-    /// coverage is a config change, not a code change (PLAN §7).
+    /// coverage is a config change, not a code change.
     pub source_roots: Vec<String>,
 }
 
@@ -97,7 +97,7 @@ pub struct Output {
     pub mode: OutputMode,
     pub format: OutputFormat,
     pub fail_on: FailOn,
-    /// Minimum static-fragment length that may form a guard (PLAN §1).
+    /// Minimum static-fragment length that may form a guard.
     pub min_guard_len: usize,
     /// Dead-key budget (ratchet): fail only when the Dead bucket exceeds the cap.
     /// Absolute cap — fail when `dead_count > max_dead`. Mutually exclusive with
@@ -139,7 +139,7 @@ pub enum OutputFormat {
     Json,
 }
 
-/// Exit-code policy (PLAN §8).
+/// Exit-code policy.
 #[derive(Debug, Deserialize, Default, PartialEq, Eq, Clone, Copy)]
 #[serde(rename_all = "kebab-case")]
 pub enum FailOn {
@@ -195,7 +195,7 @@ pub fn resolve_whitelist(wl: &Whitelist, base_dir: &Path) -> Result<HashSet<Stri
 mod tests {
     use super::*;
 
-    /// The example_repo config from PLAN must deserialize into three correct
+    /// The example_repo config must deserialize into three correct
     /// call specs, and the omitted `source_roots` must default to `["."]`.
     #[test]
     fn parses_example_repo_config() {

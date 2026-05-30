@@ -1,5 +1,4 @@
-//! Source scanning — walk the roots and extract usage in parallel
-//! (PLAN Addendum 2 §6).
+//! Source scanning — walk the roots and extract usage in parallel.
 //!
 //! Files are processed with `rayon`; each worker holds a thread-local
 //! [`ParserPool`] reused across files. Per-file results are collected in input

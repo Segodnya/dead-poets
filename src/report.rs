@@ -1,5 +1,4 @@
-//! Reporter — render the liveness result and decide the process exit code
-//! (PLAN Addendum 2 §7, §8).
+//! Reporter — render the liveness result and decide the process exit code.
 //!
 //! Two formats mirror the same buckets:
 //! - **text**: a one-line scope caveat header, the ranked `Dead` list (colored),

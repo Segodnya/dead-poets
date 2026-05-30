@@ -1,5 +1,4 @@
-//! Extractor — per-language adapters behind one invariant driver
-//! (PLAN Addendum 2 §5).
+//! Extractor — per-language adapters behind one invariant driver.
 //!
 //! Contract: `extract(lang, source, calls, min_guard_len) -> ExtractResult`
 //! producing `{ literals, guards, blind, source_literals }`. The work splits in
@@ -134,8 +133,7 @@ impl ExtractResult {
 /// A reusable set of tree-sitter parsers, one lazily-created slot per grammar.
 ///
 /// `tree_sitter::Parser` is **not `Sync`** and costly to recreate per file, so a
-/// pool is held thread-locally by the scan workers and reused across files
-/// (PLAN Addendum 2 §6).
+/// pool is held thread-locally by the scan workers and reused across files.
 #[derive(Default)]
 pub struct ParserPool {
     php: Option<Parser>,

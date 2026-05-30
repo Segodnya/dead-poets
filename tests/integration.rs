@@ -1,4 +1,4 @@
-//! Phase 10 — end-to-end integration over the *compiled binary*.
+//! End-to-end integration over the *compiled binary*.
 //!
 //! These tests run the real `dead-poets` executable (the same one a user
 //! invokes) against synthetic, `example_repo`-shaped fixtures. They assert the

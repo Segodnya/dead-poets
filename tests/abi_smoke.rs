@@ -1,6 +1,6 @@
-//! Phase 0 — ABI smoke test.
+//! ABI smoke test.
 //! Confirms every pinned tree-sitter grammar loads into a Parser and parses
-//! a trivial snippet without panic / ABI mismatch (PLAN Addendum 2 §6).
+//! a trivial snippet without panic / ABI mismatch.
 
 use tree_sitter::Parser;
 

@@ -1,7 +1,6 @@
 //! PO key universe — the set of keys we check for liveness.
 //!
-//! The universe is the **union of msgids across all locales** (PLAN: "Build the
-//! key universe as the union of msgids across all locales"). A key is modelled
+//! The universe is the **union of msgids across all locales**. A key is modelled
 //! as `(msgctxt?, msgid, msgid_plural?)` so context/plural projects are
 //! supported generically, even though `example_repo` exercises neither.
 //!

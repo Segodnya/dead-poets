@@ -1,4 +1,4 @@
-//! Liveness classification (PLAN Addendum 2 §2, §3).
+//! Liveness classification.
 //!
 //! Signals, in precedence order — a PO key is **Alive** if it has a whitelist,
 //! literal, or guard match; live keys carry `alive_via` so "alive via guard" (the

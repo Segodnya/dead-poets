@@ -1,4 +1,4 @@
-//! Guard layer — the central correctness invariant (PLAN Addendum 2 §1).
+//! Guard layer — the central correctness invariant.
 //!
 //! A dynamic key argument (template string, concatenation, interpolated
 //! double-quote) is modelled as an ordered list of [`Segment`]s: decoded static
