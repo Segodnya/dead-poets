@@ -13,9 +13,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use globset::{Glob, GlobSetBuilder};
-use ignore::WalkBuilder;
 use polib::catalog::Catalog;
 use polib::po_file;
+
+use crate::walk::find_files;
 
 /// A PO catalog key. Equality/hash over the full tuple so the union across
 /// locales deduplicates identical entries.
@@ -77,41 +78,11 @@ pub fn collect_po_files(
     }
     let globs = builder.build().context("failed to build PO glob set")?;
 
-    let ignored: HashSet<String> = ignore_dirs.iter().cloned().collect();
-    let mut found = Vec::new();
-    let mut seen = HashSet::new();
-
-    for root in roots {
-        let ignored = ignored.clone();
-        let mut walker = WalkBuilder::new(root);
-        walker.filter_entry(move |entry| {
-            // Prune ignored directories by name; always keep files.
-            if entry.file_type().is_some_and(|t| t.is_dir())
-                && let Some(name) = entry.file_name().to_str()
-            {
-                return !ignored.contains(name);
-            }
-            true
-        });
-
-        for result in walker.build() {
-            let entry = result.with_context(|| format!("error walking {}", root.display()))?;
-            if !entry.file_type().is_some_and(|t| t.is_file()) {
-                continue;
-            }
-            let path = entry.path();
-            let rel = path.strip_prefix(root).unwrap_or(path);
-            if globs.is_match(rel) || globs.is_match(path) {
-                let owned = path.to_path_buf();
-                if seen.insert(owned.clone()) {
-                    found.push(owned);
-                }
-            }
-        }
-    }
-
-    found.sort();
-    Ok(found)
+    // Patterns are anchored at the root, so match `rel` first; fall back to the
+    // absolute path for patterns written against it.
+    find_files(roots, ignore_dirs, |entry| {
+        (globs.is_match(entry.rel) || globs.is_match(entry.abs)).then(|| entry.abs.to_path_buf())
+    })
 }
 
 /// Build the key universe from the given PO files.

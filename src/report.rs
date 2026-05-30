@@ -19,6 +19,7 @@ use colored::Colorize;
 use serde::Serialize;
 
 use crate::audit::{AuditReport, Trace};
+use crate::budget::DeadBudget;
 use crate::config::{FailOn, OutputFormat};
 use crate::liveness::{AliveVia, LivenessReport, Status};
 use crate::po::PoKey;
@@ -71,38 +72,6 @@ fn blind_line(blind: &BTreeMap<String, usize>) -> String {
         "Blind spots (unverifiable call sites): {}",
         parts.join(", ")
     )
-}
-
-/// The resolved dead-key budget the exit gate enforces. `Count(0)` (the default)
-/// reproduces the historical behaviour — any dead key fails.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum DeadBudget {
-    /// Absolute cap: fail when `dead > Count`.
-    Count(usize),
-    /// Share of the universe: fail when `dead / total > Ratio`.
-    Ratio(f64),
-}
-
-impl Default for DeadBudget {
-    fn default() -> Self {
-        DeadBudget::Count(0)
-    }
-}
-
-impl DeadBudget {
-    /// Whether the Dead bucket exceeds this budget.
-    fn is_exceeded(self, dead: usize, total: usize) -> bool {
-        match self {
-            DeadBudget::Count(max) => dead > max,
-            DeadBudget::Ratio(r) => total > 0 && (dead as f64 / total as f64) > r,
-        }
-    }
-
-    /// A non-default budget the user explicitly set — drives whether the budget
-    /// line is shown. `Count(0)` is the historical default and stays silent.
-    fn is_set(self) -> bool {
-        !matches!(self, DeadBudget::Count(0))
-    }
 }
 
 fn trace_str(trace: Trace) -> &'static str {
@@ -426,6 +395,7 @@ pub fn exit_code(report: &LivenessReport, fail_on: FailOn, budget: DeadBudget) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::budget::DeadBudget;
     use crate::liveness::{KeyVerdict, LivenessReport, Status};
 
     fn key(msgid: &str) -> PoKey {

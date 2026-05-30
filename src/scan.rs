@@ -10,13 +10,13 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
-use ignore::WalkBuilder;
+use anyhow::Result;
 use rayon::prelude::*;
 
 use crate::config::CallSpec;
 use crate::extract::{ExtractResult, ParserPool, SourceLang, extract_with_pool};
 use crate::liveness::Usage;
+use crate::walk::find_files;
 
 thread_local! {
     static POOL: RefCell<ParserPool> = RefCell::new(ParserPool::new());
@@ -29,47 +29,18 @@ pub fn collect_source_files(
     ignore_dirs: &[String],
 ) -> Result<Vec<(SourceLang, PathBuf)>> {
     let exts: HashSet<String> = source_extensions.iter().map(|e| e.to_lowercase()).collect();
-    let ignored: HashSet<String> = ignore_dirs.iter().cloned().collect();
-    let mut found = Vec::new();
-    let mut seen = HashSet::new();
-
-    for root in roots {
-        let ignored = ignored.clone();
-        let mut walker = WalkBuilder::new(root);
-        walker.filter_entry(move |entry| {
-            if entry.file_type().is_some_and(|t| t.is_dir())
-                && let Some(name) = entry.file_name().to_str()
-            {
-                return !ignored.contains(name);
-            }
-            true
-        });
-
-        for result in walker.build() {
-            let entry = result.with_context(|| format!("error walking {}", root.display()))?;
-            if !entry.file_type().is_some_and(|t| t.is_file()) {
-                continue;
-            }
-            let path = entry.path();
-            let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
-                continue;
-            };
-            let ext = ext.to_lowercase();
-            if !exts.contains(&ext) {
-                continue;
-            }
-            if let Some(lang) = SourceLang::from_extension(&ext) {
-                let owned = path.to_path_buf();
-                if seen.insert(owned.clone()) {
-                    found.push((lang, owned));
-                }
-            }
+    find_files(roots, ignore_dirs, |entry| {
+        let ext = entry
+            .abs
+            .extension()
+            .and_then(|e| e.to_str())?
+            .to_lowercase();
+        if !exts.contains(&ext) {
+            return None;
         }
-    }
-
-    // Deterministic order so the parallel fold is reproducible.
-    found.sort_by(|a, b| a.1.cmp(&b.1));
-    Ok(found)
+        let lang = SourceLang::from_extension(&ext)?;
+        Some((lang, entry.abs.to_path_buf()))
+    })
 }
 
 /// Scan all sources under `roots` and aggregate their translation usage.

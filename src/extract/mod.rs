@@ -1,26 +1,30 @@
-//! Extractor adapters — per-kind matchers over each language (PLAN Addendum 2 §5).
+//! Extractor — per-language adapters behind one invariant driver
+//! (PLAN Addendum 2 §5).
 //!
 //! Contract: `extract(lang, source, calls, min_guard_len) -> ExtractResult`
-//! producing `{ literals, guards, blind }`. Each `[[calls]]` entry drives a
-//! matcher by `kind`:
-//! - `function` → PHP `function_call_expression` / JS `call_expression` on a
-//!   bare name;
-//! - `method`   → PHP `member_call_expression` / JS member call, matched on name
-//!   **and** a normalized receiver (`$i18n` → `i18n`, `$this->i18n` → `this.i18n`);
-//! - `filter`   → Twig regex on the filter name.
+//! producing `{ literals, guards, blind, source_literals }`. The work splits in
+//! two:
 //!
-//! The selected `key_arg_index` argument is decomposed into [`Segment`]s: a fully
-//! static argument becomes a literal; a dynamic one is routed to the guard layer;
-//! a non-extractable one increments `blind`. Two concatenated string literals
-//! resolve to a single literal.
+//! - **what varies per grammar** lives behind the [`AstMatcher`] seam — one
+//!   adapter per family ([`php::Php`], [`js::Js`]): classify a node as a call
+//!   site, decode a value node into [`Segment`]s, and recognise a string literal.
+//! - **what is invariant** lives here, written once: [`match_spec`] resolves a
+//!   classified [`CallShape`] against the configured `[[calls]]`, the driver
+//!   selects `key_arg_index`, and [`ExtractResult::record`] routes a fully-static
+//!   argument to a literal and a dynamic one to the guard layer (or a blind site).
+//!
+//! Twig has no tree — it is a separate regex adapter ([`twig::extract_twig`]),
+//! not an `AstMatcher`. Two concatenated string literals resolve to one literal.
+
+mod js;
+mod php;
+mod twig;
 
 use std::collections::HashSet;
 
-use regex::Regex;
 use tree_sitter::{Node, Parser};
 
 use crate::config::{CallKind, CallSpec};
-use crate::decode::{Decoded, Lang, decode_token, unescape_js, unescape_php_double};
 use crate::guard::{Guard, Segment, guards_from_segments};
 
 /// The source language of a file, selecting grammar (or the Twig regex path).
@@ -68,21 +72,6 @@ impl SourceLang {
             SourceLang::Twig => unreachable!("Twig uses the regex path, not a grammar"),
         }
     }
-
-    fn family(&self) -> Family {
-        match self {
-            SourceLang::Php => Family::Php,
-            SourceLang::Twig => Family::Twig,
-            _ => Family::Js,
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Family {
-    Php,
-    Js,
-    Twig,
 }
 
 /// What one source file contributed: resolved literal keys, keep-alive guards,
@@ -205,12 +194,12 @@ pub fn extract_with_pool(
     // collection (the `Suspect` tier) must see every file, including pure data
     // files that hold no translation calls at all (currency tables, enums, …).
     let applicable: Vec<&CallSpec> = calls.iter().filter(|c| call_applies(c, lang)).collect();
-    match lang.family() {
-        Family::Twig => extract_twig(source, &applicable),
-        _ => match pool.get(lang) {
-            Some(parser) => extract_ast_with(parser, lang, source, &applicable, min_guard_len),
-            None => ExtractResult::default(),
-        },
+    match lang {
+        SourceLang::Twig => twig::extract_twig(source, &applicable),
+        SourceLang::Php => run_ast::<php::Php>(pool, lang, source, &applicable, min_guard_len),
+        SourceLang::Js | SourceLang::Jsx | SourceLang::Ts | SourceLang::Tsx => {
+            run_ast::<js::Js>(pool, lang, source, &applicable, min_guard_len)
+        }
     }
 }
 
@@ -230,13 +219,84 @@ fn call_applies(call: &CallSpec, lang: SourceLang) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// AST path (PHP / JS / TS / TSX)
+// The AST seam (PHP / JS / TS / TSX)
 // ---------------------------------------------------------------------------
 
-/// Parse with an already-configured parser (its grammar set to `lang`) and walk.
-fn extract_ast_with(
-    parser: &mut Parser,
+/// A classified call site: enough for the driver to match a `[[calls]]` spec and
+/// locate the key argument. Holds tree nodes (borrowed for the walk) plus the
+/// already-extracted name/receiver — the adapter does the grammar-specific
+/// decoding, the driver does the invariant matching.
+pub(crate) enum CallShape<'a> {
+    /// Free function: `i18n('key')`.
+    Function { name: String, args: Vec<Node<'a>> },
+    /// Method with a normalized receiver: `$i18n->get('key')`.
+    Method {
+        name: String,
+        receiver: String,
+        args: Vec<Node<'a>>,
+    },
+    /// Index access: `locale['key']`. `object` is the normalized indexed object;
+    /// `key` is the subscript node.
+    Index { object: String, key: Node<'a> },
+}
+
+impl<'a> CallShape<'a> {
+    /// The key-argument node this site carries: the `key_arg_index`-th positional
+    /// argument for a call, or the subscript for an index access.
+    fn key_arg(&self, spec: &CallSpec) -> Option<Node<'a>> {
+        match self {
+            CallShape::Function { args, .. } | CallShape::Method { args, .. } => {
+                args.get(spec.key_arg_index).copied()
+            }
+            CallShape::Index { key, .. } => Some(*key),
+        }
+    }
+}
+
+/// A per-language AST adapter: the small, grammar-specific surface the driver
+/// drives. Each method is a pure node → value mapping, so it is testable in
+/// isolation against a parsed snippet (see the per-adapter tests).
+pub(crate) trait AstMatcher {
+    /// Classify a node as a translation call site, if it is one. The returned
+    /// shape borrows the tree (`'a`), not `src`.
+    fn classify<'a>(node: Node<'a>, src: &str) -> Option<CallShape<'a>>;
+    /// Decode a value node into key segments (static text interleaved with holes).
+    fn segments(node: Node, src: &str) -> Vec<Segment>;
+    /// If this node is a string literal, its decoded segments — fed to the
+    /// `Suspect` tier's source-literal collection regardless of context.
+    fn literal(node: Node, src: &str) -> Option<Vec<Segment>>;
+}
+
+/// Resolve a classified call site against the applicable `[[calls]]` specs. This
+/// predicate is the single invariant that used to be copy-pasted per language.
+fn match_spec<'c>(calls: &[&'c CallSpec], shape: &CallShape) -> Option<&'c CallSpec> {
+    calls.iter().copied().find(|c| match shape {
+        CallShape::Function { name, .. } => c.kind == CallKind::Function && &c.name == name,
+        CallShape::Method { name, receiver, .. } => {
+            c.kind == CallKind::Method && &c.name == name && receiver_ok(c, receiver)
+        }
+        CallShape::Index { object, .. } => c.kind == CallKind::Index && &c.name == object,
+    })
+}
+
+/// Fetch the pool's parser for `lang` and run the driver with adapter `M`.
+fn run_ast<M: AstMatcher>(
+    pool: &mut ParserPool,
     lang: SourceLang,
+    source: &str,
+    calls: &[&CallSpec],
+    min_guard_len: usize,
+) -> ExtractResult {
+    match pool.get(lang) {
+        Some(parser) => extract_ast::<M>(parser, source, calls, min_guard_len),
+        None => ExtractResult::default(),
+    }
+}
+
+/// Parse and walk every node once, driving adapter `M`: match-and-record key
+/// arguments, and collect source literals for the Suspect tier.
+fn extract_ast<M: AstMatcher>(
+    parser: &mut Parser,
     source: &str,
     calls: &[&CallSpec],
     min_guard_len: usize,
@@ -246,37 +306,21 @@ fn extract_ast_with(
     };
 
     let mut res = ExtractResult::default();
-    let family = lang.family();
     for_each_node(tree.root_node(), |node| {
-        match family {
-            Family::Php => try_php_call(node, source, calls, min_guard_len, &mut res),
-            Family::Js => {
-                try_js_call(node, source, calls, min_guard_len, &mut res);
-                try_js_index(node, source, calls, min_guard_len, &mut res);
-            }
-            Family::Twig => {}
+        if let Some(shape) = M::classify(node, source)
+            && let Some(spec) = match_spec(calls, &shape)
+            && let Some(arg) = shape.key_arg(spec)
+        {
+            res.record(M::segments(arg, source), min_guard_len);
         }
-        collect_ast_literal(node, family, source, &mut res);
+        if let Some(segments) = M::literal(node, source) {
+            res.record_source_literal(&segments);
+        }
     });
     res
 }
 
-/// Collect a fully-static string literal node into `source_literals`, regardless
-/// of whether it sits inside a translation call (the `Suspect` tier).
-fn collect_ast_literal(node: Node, family: Family, src: &str, res: &mut ExtractResult) {
-    let segments = match family {
-        Family::Php => match node.kind() {
-            "string" | "encapsed_string" => php_segments(node, src),
-            _ => return,
-        },
-        Family::Js => match node.kind() {
-            "string" | "template_string" => js_segments(node, src),
-            _ => return,
-        },
-        Family::Twig => return,
-    };
-    res.record_source_literal(&segments);
-}
+// --- shared AST helpers ----------------------------------------------------
 
 /// Iterative pre-order walk over every node.
 fn for_each_node<F: FnMut(Node)>(root: Node, mut f: F) {
@@ -301,312 +345,6 @@ fn receiver_ok(spec: &CallSpec, receiver: &str) -> bool {
     }
 }
 
-// --- PHP -------------------------------------------------------------------
-
-fn try_php_call(
-    node: Node,
-    src: &str,
-    calls: &[&CallSpec],
-    min_guard_len: usize,
-    res: &mut ExtractResult,
-) {
-    match node.kind() {
-        "function_call_expression" => {
-            let Some(func) = node.child_by_field_name("function") else {
-                return;
-            };
-            if func.kind() != "name" {
-                return;
-            }
-            let name = text(func, src);
-            if let Some(spec) = calls
-                .iter()
-                .find(|c| c.kind == CallKind::Function && c.name == name)
-            {
-                record_php_key_arg(node, spec, src, min_guard_len, res);
-            }
-        }
-        "member_call_expression" => {
-            let (Some(name_node), Some(obj)) = (
-                node.child_by_field_name("name"),
-                node.child_by_field_name("object"),
-            ) else {
-                return;
-            };
-            let mname = text(name_node, src);
-            let receiver = normalize_php_receiver(obj, src);
-            if let Some(spec) = calls.iter().find(|c| {
-                c.kind == CallKind::Method && c.name == mname && receiver_ok(c, &receiver)
-            }) {
-                record_php_key_arg(node, spec, src, min_guard_len, res);
-            }
-        }
-        "scoped_call_expression" => {
-            let (Some(name_node), Some(scope)) = (
-                node.child_by_field_name("name"),
-                node.child_by_field_name("scope"),
-            ) else {
-                return;
-            };
-            let mname = text(name_node, src);
-            let receiver = text(scope, src).trim_start_matches('$').to_string();
-            if let Some(spec) = calls.iter().find(|c| {
-                c.kind == CallKind::Method && c.name == mname && receiver_ok(c, &receiver)
-            }) {
-                record_php_key_arg(node, spec, src, min_guard_len, res);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn record_php_key_arg(
-    call: Node,
-    spec: &CallSpec,
-    src: &str,
-    min_guard_len: usize,
-    res: &mut ExtractResult,
-) {
-    let Some(args) = call.child_by_field_name("arguments") else {
-        return;
-    };
-    let values = php_arg_values(args);
-    if let Some(&arg) = values.get(spec.key_arg_index) {
-        let segments = php_segments(arg, src);
-        res.record(segments, min_guard_len);
-    }
-}
-
-/// Collect PHP argument *value* nodes (unwrapping each `argument`).
-fn php_arg_values(args: Node) -> Vec<Node> {
-    let mut out = Vec::new();
-    let mut cursor = args.walk();
-    for child in args.named_children(&mut cursor) {
-        if child.kind() == "argument" {
-            let count = child.named_child_count();
-            if count > 0
-                && let Some(value) = child.named_child(count as u32 - 1)
-            {
-                out.push(value);
-            }
-        }
-    }
-    out
-}
-
-fn normalize_php_receiver(node: Node, src: &str) -> String {
-    match node.kind() {
-        "variable_name" => text(node, src).trim_start_matches('$').to_string(),
-        "name" => text(node, src).to_string(),
-        "member_access_expression" => {
-            match (
-                node.child_by_field_name("object"),
-                node.child_by_field_name("name"),
-            ) {
-                (Some(obj), Some(name)) => {
-                    format!("{}.{}", normalize_php_receiver(obj, src), text(name, src))
-                }
-                _ => text(node, src).trim_start_matches('$').to_string(),
-            }
-        }
-        // The receiver is itself a call returning the i18n object: a factory like
-        // `Container::get_i18n()->get(…)`, `get_i18n()->get(…)`, or
-        // `$x->getI18n()->get(…)`. Normalize to the callee name + `()` so the
-        // config anchors on the factory (`get_i18n()`), not the class it hangs
-        // off — by far the most common PHP convention in real codebases.
-        "function_call_expression" | "scoped_call_expression" | "member_call_expression" => {
-            match node.child_by_field_name(if node.kind() == "function_call_expression" {
-                "function"
-            } else {
-                "name"
-            }) {
-                Some(callee) => format!("{}()", text(callee, src)),
-                None => text(node, src).trim_start_matches('$').to_string(),
-            }
-        }
-        _ => text(node, src).trim_start_matches('$').to_string(),
-    }
-}
-
-fn php_segments(node: Node, src: &str) -> Vec<Segment> {
-    match node.kind() {
-        "string" => match decode_token(Lang::Php, text(node, src)) {
-            Decoded::Literal(s) => vec![Segment::Static(s)],
-            Decoded::Dynamic => vec![Segment::Hole],
-        },
-        "encapsed_string" => {
-            let mut segs = Vec::new();
-            let mut cursor = node.walk();
-            for child in node.named_children(&mut cursor) {
-                match child.kind() {
-                    "string_content" => segs.push(Segment::Static(text(child, src).to_string())),
-                    "escape_sequence" => {
-                        segs.push(Segment::Static(unescape_php_double(text(child, src))))
-                    }
-                    _ => segs.push(Segment::Hole),
-                }
-            }
-            if segs.is_empty() {
-                vec![Segment::Static(String::new())]
-            } else {
-                segs
-            }
-        }
-        "binary_expression" if binary_operator(node, src).as_deref() == Some(".") => {
-            concat_segments(node, src, php_segments)
-        }
-        _ => vec![Segment::Hole],
-    }
-}
-
-// --- JS / TS ---------------------------------------------------------------
-
-fn try_js_call(
-    node: Node,
-    src: &str,
-    calls: &[&CallSpec],
-    min_guard_len: usize,
-    res: &mut ExtractResult,
-) {
-    if node.kind() != "call_expression" {
-        return;
-    }
-    let Some(func) = node.child_by_field_name("function") else {
-        return;
-    };
-    match func.kind() {
-        "identifier" => {
-            let name = text(func, src);
-            if let Some(spec) = calls
-                .iter()
-                .find(|c| c.kind == CallKind::Function && c.name == name)
-            {
-                record_js_key_arg(node, spec, src, min_guard_len, res);
-            }
-        }
-        "member_expression" => {
-            let (Some(prop), Some(obj)) = (
-                func.child_by_field_name("property"),
-                func.child_by_field_name("object"),
-            ) else {
-                return;
-            };
-            let name = text(prop, src);
-            let receiver = normalize_js_receiver(obj, src);
-            if let Some(spec) = calls
-                .iter()
-                .find(|c| c.kind == CallKind::Method && c.name == name && receiver_ok(c, &receiver))
-            {
-                record_js_key_arg(node, spec, src, min_guard_len, res);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Index access `obj['key']` (JS `subscript_expression`). Matched when the
-/// object normalizes to the configured `name` (`locale`, `this.locale`, …); the
-/// subscript is decoded by the same literal/guard/blind path as a call argument.
-fn try_js_index(
-    node: Node,
-    src: &str,
-    calls: &[&CallSpec],
-    min_guard_len: usize,
-    res: &mut ExtractResult,
-) {
-    if node.kind() != "subscript_expression" {
-        return;
-    }
-    let (Some(obj), Some(index)) = (
-        node.child_by_field_name("object"),
-        node.child_by_field_name("index"),
-    ) else {
-        return;
-    };
-    let obj_name = normalize_js_receiver(obj, src);
-    if calls
-        .iter()
-        .any(|c| c.kind == CallKind::Index && c.name == obj_name)
-    {
-        let segments = js_segments(index, src);
-        res.record(segments, min_guard_len);
-    }
-}
-
-fn record_js_key_arg(
-    call: Node,
-    spec: &CallSpec,
-    src: &str,
-    min_guard_len: usize,
-    res: &mut ExtractResult,
-) {
-    let Some(args) = call.child_by_field_name("arguments") else {
-        return;
-    };
-    let mut values = Vec::new();
-    let mut cursor = args.walk();
-    for child in args.named_children(&mut cursor) {
-        if child.kind() != "comment" {
-            values.push(child);
-        }
-    }
-    if let Some(&arg) = values.get(spec.key_arg_index) {
-        let segments = js_segments(arg, src);
-        res.record(segments, min_guard_len);
-    }
-}
-
-fn normalize_js_receiver(node: Node, src: &str) -> String {
-    match node.kind() {
-        "identifier" | "property_identifier" => text(node, src).to_string(),
-        "this" => "this".to_string(),
-        "member_expression" => {
-            match (
-                node.child_by_field_name("object"),
-                node.child_by_field_name("property"),
-            ) {
-                (Some(obj), Some(prop)) => {
-                    format!("{}.{}", normalize_js_receiver(obj, src), text(prop, src))
-                }
-                _ => text(node, src).to_string(),
-            }
-        }
-        _ => text(node, src).to_string(),
-    }
-}
-
-fn js_segments(node: Node, src: &str) -> Vec<Segment> {
-    match node.kind() {
-        "string" => match decode_token(Lang::Js, text(node, src)) {
-            Decoded::Literal(s) => vec![Segment::Static(s)],
-            Decoded::Dynamic => vec![Segment::Hole],
-        },
-        "template_string" => {
-            let mut segs = Vec::new();
-            let mut cursor = node.walk();
-            for child in node.named_children(&mut cursor) {
-                match child.kind() {
-                    "template_substitution" => segs.push(Segment::Hole),
-                    "escape_sequence" => segs.push(Segment::Static(unescape_js(text(child, src)))),
-                    // string_fragment and anything else: raw static text.
-                    _ => segs.push(Segment::Static(text(child, src).to_string())),
-                }
-            }
-            if segs.is_empty() {
-                vec![Segment::Static(String::new())]
-            } else {
-                segs
-            }
-        }
-        "binary_expression" if binary_operator(node, src).as_deref() == Some("+") => {
-            concat_segments(node, src, js_segments)
-        }
-        _ => vec![Segment::Hole],
-    }
-}
-
-// --- shared AST helpers ----------------------------------------------------
-
 /// The operator token of a binary expression (first unnamed child).
 fn binary_operator(node: Node, src: &str) -> Option<String> {
     let mut cursor = node.walk();
@@ -628,49 +366,6 @@ fn concat_segments(node: Node, src: &str, f: fn(Node, &str) -> Vec<Segment>) -> 
         segs.extend(f(right, src));
     }
     segs
-}
-
-// ---------------------------------------------------------------------------
-// Twig path (regex)
-// ---------------------------------------------------------------------------
-
-fn extract_twig(source: &str, calls: &[&CallSpec]) -> ExtractResult {
-    let mut res = ExtractResult::default();
-
-    // Source-literal collection (Suspect tier): every quoted string in the
-    // template, independent of any filter. Interpolated strings (`#{…}`) are not
-    // static and are skipped.
-    let str_re = Regex::new(r#"'([^'\n]*)'|"([^"\n]*)""#).expect("valid string regex");
-    for cap in str_re.captures_iter(source) {
-        if let Some(m) = cap.get(1).or_else(|| cap.get(2)) {
-            let s = m.as_str();
-            if !s.is_empty() && !s.contains("#{") {
-                res.source_literals.insert(s.to_string());
-            }
-        }
-    }
-
-    for call in calls.iter().filter(|c| c.kind == CallKind::Filter) {
-        let name = regex::escape(&call.name);
-        let total_re = Regex::new(&format!(r"\|\s*{name}\b")).expect("valid total regex");
-        let lit_re = Regex::new(&format!(r#"['"]([^'"]*)['"]\s*\|\s*{name}\b"#))
-            .expect("valid literal regex");
-
-        let total = total_re.find_iter(source).count();
-        let mut kept = 0;
-        for cap in lit_re.captures_iter(source) {
-            let key = &cap[1];
-            // Twig string interpolation (`#{…}`) can't be resolved statically.
-            if key.contains("#{") {
-                continue;
-            }
-            res.literals.insert(key.to_string());
-            kept += 1;
-        }
-        // Every use we couldn't resolve to a literal is a blind spot.
-        res.blind += total.saturating_sub(kept);
-    }
-    res
 }
 
 #[cfg(test)]
