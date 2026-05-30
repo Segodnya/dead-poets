@@ -15,3 +15,4 @@ pub mod guard;
 pub mod liveness;
 pub mod po;
 pub mod report;
+pub mod scan;

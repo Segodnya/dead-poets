@@ -117,8 +117,60 @@ impl ExtractResult {
     }
 }
 
-/// Extract translation keys from one source file.
+/// A reusable set of tree-sitter parsers, one lazily-created slot per grammar.
+///
+/// `tree_sitter::Parser` is **not `Sync`** and costly to recreate per file, so a
+/// pool is held thread-locally by the scan workers and reused across files
+/// (PLAN Addendum 2 §6).
+#[derive(Default)]
+pub struct ParserPool {
+    php: Option<Parser>,
+    js: Option<Parser>,
+    ts: Option<Parser>,
+    tsx: Option<Parser>,
+}
+
+impl ParserPool {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Get (lazily creating) the parser for a language, with its grammar set.
+    /// Returns `None` for Twig (regex path) or on grammar load failure.
+    fn get(&mut self, lang: SourceLang) -> Option<&mut Parser> {
+        let slot = match lang {
+            SourceLang::Php => &mut self.php,
+            SourceLang::Js | SourceLang::Jsx => &mut self.js,
+            SourceLang::Ts => &mut self.ts,
+            SourceLang::Tsx => &mut self.tsx,
+            SourceLang::Twig => return None,
+        };
+        if slot.is_none() {
+            let mut parser = Parser::new();
+            if parser.set_language(&lang.language()).is_err() {
+                return None;
+            }
+            *slot = Some(parser);
+        }
+        slot.as_mut()
+    }
+}
+
+/// Extract translation keys from one source file, creating a throwaway parser.
+/// Convenient for one-off use and tests; the scan path uses [`extract_with_pool`].
 pub fn extract(
+    lang: SourceLang,
+    source: &str,
+    calls: &[CallSpec],
+    min_guard_len: usize,
+) -> ExtractResult {
+    let mut pool = ParserPool::new();
+    extract_with_pool(&mut pool, lang, source, calls, min_guard_len)
+}
+
+/// Extract translation keys reusing parsers from `pool`.
+pub fn extract_with_pool(
+    pool: &mut ParserPool,
     lang: SourceLang,
     source: &str,
     calls: &[CallSpec],
@@ -130,7 +182,10 @@ pub fn extract(
     }
     match lang.family() {
         Family::Twig => extract_twig(source, &applicable),
-        _ => extract_ast(lang, source, &applicable, min_guard_len),
+        _ => match pool.get(lang) {
+            Some(parser) => extract_ast_with(parser, lang, source, &applicable, min_guard_len),
+            None => ExtractResult::default(),
+        },
     }
 }
 
@@ -150,16 +205,14 @@ fn call_applies(call: &CallSpec, lang: SourceLang) -> bool {
 // AST path (PHP / JS / TS / TSX)
 // ---------------------------------------------------------------------------
 
-fn extract_ast(
+/// Parse with an already-configured parser (its grammar set to `lang`) and walk.
+fn extract_ast_with(
+    parser: &mut Parser,
     lang: SourceLang,
     source: &str,
     calls: &[&CallSpec],
     min_guard_len: usize,
 ) -> ExtractResult {
-    let mut parser = Parser::new();
-    if parser.set_language(&lang.language()).is_err() {
-        return ExtractResult::default();
-    }
     let Some(tree) = parser.parse(source, None) else {
         return ExtractResult::default();
     };
