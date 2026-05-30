@@ -99,6 +99,14 @@ pub struct Output {
     pub fail_on: FailOn,
     /// Minimum static-fragment length that may form a guard (PLAN §1).
     pub min_guard_len: usize,
+    /// Dead-key budget (ratchet): fail only when the Dead bucket exceeds the cap.
+    /// Absolute cap — fail when `dead_count > max_dead`. Mutually exclusive with
+    /// `max_dead_ratio`. Absent → any dead fails (the historical default).
+    pub max_dead: Option<usize>,
+    /// Dead-key budget as a share of the whole PO universe (0.0–1.0) — fail when
+    /// `dead_count / total_keys > max_dead_ratio`. Mutually exclusive with
+    /// `max_dead`.
+    pub max_dead_ratio: Option<f64>,
 }
 
 impl Default for Output {
@@ -108,6 +116,8 @@ impl Default for Output {
             format: OutputFormat::default(),
             fail_on: FailOn::default(),
             min_guard_len: 3,
+            max_dead: None,
+            max_dead_ratio: None,
         }
     }
 }
@@ -256,6 +266,23 @@ mod tests {
         let cfg2: Config =
             toml::from_str("[[calls]]\nlang=\"js\"\nkind=\"function\"\nname=\"i18n\"").unwrap();
         assert_eq!(cfg2.calls[0].key_arg_index, 0);
+    }
+
+    /// The dead-key budget knobs parse when present and default to `None`.
+    #[test]
+    fn dead_budget_knobs_parse() {
+        let cfg: Config = toml::from_str("[output]\nmax_dead = 2900").unwrap();
+        assert_eq!(cfg.output.max_dead, Some(2900));
+        assert_eq!(cfg.output.max_dead_ratio, None);
+
+        let cfg: Config = toml::from_str("[output]\nmax_dead_ratio = 0.15").unwrap();
+        assert_eq!(cfg.output.max_dead_ratio, Some(0.15));
+        assert_eq!(cfg.output.max_dead, None);
+
+        // Absent in an empty config -> both None.
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.output.max_dead, None);
+        assert_eq!(cfg.output.max_dead_ratio, None);
     }
 
     /// `dead-or-blind` is a valid fail_on value (kebab-case mapping).

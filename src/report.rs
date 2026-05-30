@@ -73,6 +73,38 @@ fn blind_line(blind: &BTreeMap<String, usize>) -> String {
     )
 }
 
+/// The resolved dead-key budget the exit gate enforces. `Count(0)` (the default)
+/// reproduces the historical behaviour — any dead key fails.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DeadBudget {
+    /// Absolute cap: fail when `dead > Count`.
+    Count(usize),
+    /// Share of the universe: fail when `dead / total > Ratio`.
+    Ratio(f64),
+}
+
+impl Default for DeadBudget {
+    fn default() -> Self {
+        DeadBudget::Count(0)
+    }
+}
+
+impl DeadBudget {
+    /// Whether the Dead bucket exceeds this budget.
+    fn is_exceeded(self, dead: usize, total: usize) -> bool {
+        match self {
+            DeadBudget::Count(max) => dead > max,
+            DeadBudget::Ratio(r) => total > 0 && (dead as f64 / total as f64) > r,
+        }
+    }
+
+    /// A non-default budget the user explicitly set — drives whether the budget
+    /// line is shown. `Count(0)` is the historical default and stays silent.
+    fn is_set(self) -> bool {
+        !matches!(self, DeadBudget::Count(0))
+    }
+}
+
 fn trace_str(trace: Trace) -> &'static str {
     match trace {
         Trace::Substring => "substring",
@@ -103,8 +135,54 @@ fn audit_block(audit: &AuditReport) -> String {
     s
 }
 
+/// The dead-key budget line (text). Shown only for a non-default budget; reports
+/// the headroom (or overage) so the ratchet is visible at a glance.
+fn budget_line(dead: usize, total: usize, budget: DeadBudget) -> Option<String> {
+    if !budget.is_set() {
+        return None;
+    }
+    let over = budget.is_exceeded(dead, total);
+    let body = match budget {
+        DeadBudget::Count(max) => {
+            if over {
+                format!(
+                    "Budget: {dead} / {max} dead allowed — OVER by {}.",
+                    dead - max
+                )
+            } else {
+                format!(
+                    "Budget: {dead} / {max} dead allowed — within budget ({} headroom).",
+                    max - dead
+                )
+            }
+        }
+        DeadBudget::Ratio(r) => {
+            let pct = if total > 0 {
+                dead as f64 / total as f64 * 100.0
+            } else {
+                0.0
+            };
+            let cap = r * 100.0;
+            if over {
+                format!("Budget: {pct:.1}% / {cap:.1}% dead ratio — OVER.")
+            } else {
+                format!("Budget: {pct:.1}% / {cap:.1}% dead ratio — within budget.")
+            }
+        }
+    };
+    Some(if over {
+        body.red().to_string()
+    } else {
+        body.green().to_string()
+    })
+}
+
 /// Render the text report.
-pub fn render_text(report: &LivenessReport, audit: Option<&AuditReport>) -> String {
+pub fn render_text(
+    report: &LivenessReport,
+    audit: Option<&AuditReport>,
+    budget: DeadBudget,
+) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "{} {}\n\n",
@@ -149,6 +227,11 @@ pub fn render_text(report: &LivenessReport, audit: Option<&AuditReport>) -> Stri
         report.dead_count(),
         report.total_blind(),
     ));
+
+    if let Some(line) = budget_line(report.dead_count(), report.verdicts.len(), budget) {
+        out.push_str(&line);
+        out.push('\n');
+    }
 
     if let Some(audit) = audit {
         out.push('\n');
@@ -230,6 +313,36 @@ impl From<&AuditReport> for JsonAudit {
 }
 
 #[derive(Serialize)]
+struct JsonBudget {
+    kind: &'static str,
+    limit: f64,
+    dead: usize,
+    over: bool,
+}
+
+/// Build the JSON budget object for a non-default budget (else `None`).
+fn json_budget(dead: usize, total: usize, budget: DeadBudget) -> Option<JsonBudget> {
+    if !budget.is_set() {
+        return None;
+    }
+    let over = budget.is_exceeded(dead, total);
+    Some(match budget {
+        DeadBudget::Count(max) => JsonBudget {
+            kind: "count",
+            limit: max as f64,
+            dead,
+            over,
+        },
+        DeadBudget::Ratio(r) => JsonBudget {
+            kind: "ratio",
+            limit: r,
+            dead,
+            over,
+        },
+    })
+}
+
+#[derive(Serialize)]
 struct JsonReport {
     scope_caveat: &'static str,
     summary: JsonSummary,
@@ -238,11 +351,17 @@ struct JsonReport {
     alive: Vec<JsonAliveKey>,
     blind: BTreeMap<String, usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    budget: Option<JsonBudget>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     audit: Option<JsonAudit>,
 }
 
 /// Render the JSON report.
-pub fn render_json(report: &LivenessReport, audit: Option<&AuditReport>) -> Result<String> {
+pub fn render_json(
+    report: &LivenessReport,
+    audit: Option<&AuditReport>,
+    budget: DeadBudget,
+) -> Result<String> {
     let dead: Vec<JsonKey> = sorted_dead(report).into_iter().map(JsonKey::from).collect();
     let suspect: Vec<JsonKey> = sorted_suspect(report)
         .into_iter()
@@ -273,6 +392,7 @@ pub fn render_json(report: &LivenessReport, audit: Option<&AuditReport>) -> Resu
         suspect,
         alive,
         blind: report.blind.clone(),
+        budget: json_budget(report.dead_count(), report.verdicts.len(), budget),
         audit: audit.map(JsonAudit::from),
     };
     Ok(serde_json::to_string_pretty(&json)?)
@@ -282,21 +402,24 @@ pub fn render_json(report: &LivenessReport, audit: Option<&AuditReport>) -> Resu
 pub fn render(
     report: &LivenessReport,
     audit: Option<&AuditReport>,
+    budget: DeadBudget,
     format: OutputFormat,
 ) -> Result<String> {
     match format {
-        OutputFormat::Text => Ok(render_text(report, audit)),
-        OutputFormat::Json => render_json(report, audit),
+        OutputFormat::Text => Ok(render_text(report, audit, budget)),
+        OutputFormat::Json => render_json(report, audit, budget),
     }
 }
 
-/// The process exit code implied by the report under `fail_on`. Operational
-/// errors (code `2`) are decided by the caller, not here.
-pub fn exit_code(report: &LivenessReport, fail_on: FailOn) -> i32 {
+/// The process exit code implied by the report under `fail_on`, with the Dead
+/// gate relaxed to the `budget` (default `Count(0)` ⇒ any dead fails).
+/// Operational errors (code `2`) are decided by the caller, not here.
+pub fn exit_code(report: &LivenessReport, fail_on: FailOn, budget: DeadBudget) -> i32 {
+    let dead_over = budget.is_exceeded(report.dead_count(), report.verdicts.len());
     match fail_on {
         FailOn::Never => 0,
-        FailOn::Dead => i32::from(report.dead_count() > 0),
-        FailOn::DeadOrBlind => i32::from(report.dead_count() > 0 || report.total_blind() > 0),
+        FailOn::Dead => i32::from(dead_over),
+        FailOn::DeadOrBlind => i32::from(dead_over || report.total_blind() > 0),
     }
 }
 
@@ -342,7 +465,7 @@ mod tests {
 
     #[test]
     fn text_prints_only_dead_and_scope_header() {
-        let text = render_text(&report(), None);
+        let text = render_text(&report(), None, DeadBudget::default());
         // header carries the scope caveat
         assert!(text.contains("external consumers"));
         // both dead keys present, sorted
@@ -360,7 +483,7 @@ mod tests {
     #[test]
     fn json_is_valid_and_dead_count_matches_text() {
         let r = report();
-        let json = render_json(&r, None).unwrap();
+        let json = render_json(&r, None, DeadBudget::default()).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         // dead bucket count matches the report
@@ -401,13 +524,14 @@ mod tests {
             blind: BTreeMap::new(),
         };
 
-        let text = render_text(&report, None);
+        let text = render_text(&report, None, DeadBudget::default());
         assert!(text.contains("Suspect (1)"));
         assert!(text.contains("suspect_key"));
         assert!(text.contains("1 suspect"));
 
         let parsed: serde_json::Value =
-            serde_json::from_str(&render_json(&report, None).unwrap()).unwrap();
+            serde_json::from_str(&render_json(&report, None, DeadBudget::default()).unwrap())
+                .unwrap();
         assert_eq!(parsed["summary"]["suspect"], 1);
         assert_eq!(parsed["suspect"][0]["msgid"], "suspect_key");
         assert!(parsed["alive"].as_array().unwrap().is_empty());
@@ -420,7 +544,10 @@ mod tests {
             }],
             blind: BTreeMap::new(),
         };
-        assert_eq!(exit_code(&suspect_only, FailOn::Dead), 0);
+        assert_eq!(
+            exit_code(&suspect_only, FailOn::Dead, DeadBudget::default()),
+            0
+        );
     }
 
     /// With an `AuditReport` attached, the trust block appears in text and the
@@ -436,13 +563,14 @@ mod tests {
             traced: vec![(key("dead_one"), Trace::Substring)],
         };
 
-        let text = render_text(&r, Some(&audit));
+        let text = render_text(&r, Some(&audit), DeadBudget::default());
         assert!(text.contains("Audit (dead-bucket trust): 2 dead"));
         assert!(text.contains("1 no trace"));
         assert!(text.contains("1 substring"));
 
         let parsed: serde_json::Value =
-            serde_json::from_str(&render_json(&r, Some(&audit)).unwrap()).unwrap();
+            serde_json::from_str(&render_json(&r, Some(&audit), DeadBudget::default()).unwrap())
+                .unwrap();
         assert_eq!(parsed["audit"]["dead_total"], 2);
         assert_eq!(parsed["audit"]["no_trace"], 1);
         assert_eq!(parsed["audit"]["substring"], 1);
@@ -450,21 +578,24 @@ mod tests {
         assert_eq!(parsed["audit"]["traced"][0]["trace"], "substring");
 
         // No audit -> no block, no json key.
-        assert!(!render_text(&r, None).contains("Audit (dead-bucket trust)"));
+        assert!(
+            !render_text(&r, None, DeadBudget::default()).contains("Audit (dead-bucket trust)")
+        );
         let no_audit: serde_json::Value =
-            serde_json::from_str(&render_json(&r, None).unwrap()).unwrap();
+            serde_json::from_str(&render_json(&r, None, DeadBudget::default()).unwrap()).unwrap();
         assert!(no_audit.get("audit").is_none());
 
         // Audit never changes the exit code.
-        assert_eq!(exit_code(&r, FailOn::Dead), 1);
+        assert_eq!(exit_code(&r, FailOn::Dead, DeadBudget::default()), 1);
     }
 
     #[test]
     fn exit_codes_follow_fail_on() {
+        let d = DeadBudget::default();
         let r = report(); // 2 dead, 3 blind
-        assert_eq!(exit_code(&r, FailOn::Dead), 1);
-        assert_eq!(exit_code(&r, FailOn::Never), 0);
-        assert_eq!(exit_code(&r, FailOn::DeadOrBlind), 1);
+        assert_eq!(exit_code(&r, FailOn::Dead, d), 1);
+        assert_eq!(exit_code(&r, FailOn::Never, d), 0);
+        assert_eq!(exit_code(&r, FailOn::DeadOrBlind, d), 1);
 
         // a clean report
         let clean = LivenessReport {
@@ -474,8 +605,8 @@ mod tests {
             }],
             blind: BTreeMap::new(),
         };
-        assert_eq!(exit_code(&clean, FailOn::Dead), 0);
-        assert_eq!(exit_code(&clean, FailOn::DeadOrBlind), 0);
+        assert_eq!(exit_code(&clean, FailOn::Dead, d), 0);
+        assert_eq!(exit_code(&clean, FailOn::DeadOrBlind, d), 0);
 
         // clean of dead but has blind
         let mut blind = BTreeMap::new();
@@ -484,7 +615,75 @@ mod tests {
             verdicts: vec![],
             blind,
         };
-        assert_eq!(exit_code(&blindish, FailOn::Dead), 0);
-        assert_eq!(exit_code(&blindish, FailOn::DeadOrBlind), 1);
+        assert_eq!(exit_code(&blindish, FailOn::Dead, d), 0);
+        assert_eq!(exit_code(&blindish, FailOn::DeadOrBlind, d), 1);
+    }
+
+    /// An absolute budget relaxes the Dead gate: dead at/under the cap passes,
+    /// over the cap fails; `Never` ignores the budget entirely.
+    #[test]
+    fn budget_count_relaxes_dead_gate() {
+        let r = report(); // 2 dead, 3 blind, 4 total
+        // at the cap (2) -> within budget; over (1) -> fails.
+        assert_eq!(exit_code(&r, FailOn::Dead, DeadBudget::Count(2)), 0);
+        assert_eq!(exit_code(&r, FailOn::Dead, DeadBudget::Count(3)), 0);
+        assert_eq!(exit_code(&r, FailOn::Dead, DeadBudget::Count(1)), 1);
+        // dead-or-blind still fails on blind even when dead is within budget.
+        assert_eq!(exit_code(&r, FailOn::DeadOrBlind, DeadBudget::Count(2)), 1);
+        // Never never fails, budget or not.
+        assert_eq!(exit_code(&r, FailOn::Never, DeadBudget::Count(0)), 0);
+    }
+
+    /// A ratio budget fails on the share of the universe; an empty universe never
+    /// fails (guarded division).
+    #[test]
+    fn budget_ratio_uses_universe_share() {
+        let r = report(); // 2 dead / 4 total = 50%
+        assert_eq!(exit_code(&r, FailOn::Dead, DeadBudget::Ratio(0.5)), 0); // at cap passes
+        assert_eq!(exit_code(&r, FailOn::Dead, DeadBudget::Ratio(0.6)), 0);
+        assert_eq!(exit_code(&r, FailOn::Dead, DeadBudget::Ratio(0.4)), 1);
+
+        // empty universe -> no division, never over budget.
+        let empty = LivenessReport {
+            verdicts: vec![],
+            blind: BTreeMap::new(),
+        };
+        assert_eq!(exit_code(&empty, FailOn::Dead, DeadBudget::Ratio(0.0)), 0);
+    }
+
+    /// The budget line shows in text and the `budget` object in json only for a
+    /// non-default budget; the default `Count(0)` stays silent.
+    #[test]
+    fn budget_reported_only_when_set() {
+        let r = report(); // 2 dead, 4 total
+
+        // within an absolute budget -> headroom line.
+        let text = render_text(&r, None, DeadBudget::Count(5));
+        assert!(text.contains("Budget: 2 / 5 dead allowed"));
+        assert!(text.contains("within budget (3 headroom)"));
+
+        // over the budget -> overage line.
+        let over = render_text(&r, None, DeadBudget::Count(1));
+        assert!(over.contains("OVER by 1"));
+
+        // default budget -> no budget line at all.
+        assert!(!render_text(&r, None, DeadBudget::default()).contains("Budget:"));
+
+        // json carries the budget object only when set.
+        let parsed: serde_json::Value =
+            serde_json::from_str(&render_json(&r, None, DeadBudget::Count(5)).unwrap()).unwrap();
+        assert_eq!(parsed["budget"]["kind"], "count");
+        assert_eq!(parsed["budget"]["limit"], 5.0);
+        assert_eq!(parsed["budget"]["dead"], 2);
+        assert_eq!(parsed["budget"]["over"], false);
+
+        let ratio: serde_json::Value =
+            serde_json::from_str(&render_json(&r, None, DeadBudget::Ratio(0.4)).unwrap()).unwrap();
+        assert_eq!(ratio["budget"]["kind"], "ratio");
+        assert_eq!(ratio["budget"]["over"], true);
+
+        let default: serde_json::Value =
+            serde_json::from_str(&render_json(&r, None, DeadBudget::default()).unwrap()).unwrap();
+        assert!(default.get("budget").is_none());
     }
 }

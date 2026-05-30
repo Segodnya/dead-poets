@@ -34,6 +34,18 @@ pub enum Commands {
         /// (advisory; never changes classification or exit code).
         #[arg(long)]
         audit: bool,
+
+        /// Dead-key budget: fail only when more than N keys are dead. Ratchet it
+        /// down over time. Overrides `[output] max_dead`; conflicts with
+        /// `--max-dead-ratio`.
+        #[arg(long, value_name = "N")]
+        max_dead: Option<usize>,
+
+        /// Dead-key budget as a share of the PO universe (0.0–1.0): fail when the
+        /// dead ratio exceeds R. Overrides `[output] max_dead_ratio`; conflicts
+        /// with `--max-dead`.
+        #[arg(long, value_name = "R")]
+        max_dead_ratio: Option<f64>,
     },
 }
 
@@ -51,12 +63,16 @@ mod tests {
             format,
             verbose,
             audit,
+            max_dead,
+            max_dead_ratio,
         } = cli.command;
         assert_eq!(path, "./proj");
         assert_eq!(config, "dead-poets.toml");
         assert_eq!(format, "json");
         assert_eq!(verbose, 2);
         assert!(!audit, "audit defaults to false");
+        assert_eq!(max_dead, None, "max_dead defaults to None");
+        assert_eq!(max_dead_ratio, None, "max_dead_ratio defaults to None");
     }
 
     /// `--audit` flips the flag on.
@@ -65,6 +81,18 @@ mod tests {
         let cli = Cli::try_parse_from(["dead-poets", "scan", "--audit"]).unwrap();
         let Commands::Scan { audit, .. } = cli.command;
         assert!(audit);
+    }
+
+    /// The dead-key budget flags parse into their typed values.
+    #[test]
+    fn parses_budget_flags() {
+        let cli = Cli::try_parse_from(["dead-poets", "scan", "--max-dead", "2900"]).unwrap();
+        let Commands::Scan { max_dead, .. } = cli.command;
+        assert_eq!(max_dead, Some(2900));
+
+        let cli = Cli::try_parse_from(["dead-poets", "scan", "--max-dead-ratio", "0.15"]).unwrap();
+        let Commands::Scan { max_dead_ratio, .. } = cli.command;
+        assert_eq!(max_dead_ratio, Some(0.15));
     }
 
     /// Defaults match the documented PLAN values.
@@ -77,11 +105,15 @@ mod tests {
             format,
             verbose,
             audit,
+            max_dead,
+            max_dead_ratio,
         } = cli.command;
         assert_eq!(path, ".");
         assert_eq!(config, "dead-poets.toml");
         assert_eq!(format, "text");
         assert_eq!(verbose, 0);
         assert!(!audit);
+        assert_eq!(max_dead, None);
+        assert_eq!(max_dead_ratio, None);
     }
 }

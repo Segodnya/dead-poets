@@ -248,6 +248,80 @@ fn audit_scores_dead_bucket_without_changing_exit_code() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Run the binary `scan` with extra args; return (exit_code, parsed_json_stdout).
+fn run_scan_json_args(root: &Path, config: &Path, extra: &[&str]) -> (i32, serde_json::Value) {
+    let output = Command::new(BIN)
+        .arg("scan")
+        .arg(root)
+        .arg("--config")
+        .arg(config)
+        .arg("--format")
+        .arg("json")
+        .args(extra)
+        .output()
+        .expect("binary runs");
+    let code = output.status.code().expect("process exited normally");
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let json = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout is not valid JSON ({e}):\n{stdout}"));
+    (code, json)
+}
+
+/// `--max-dead` relaxes the Dead gate: a budget at/over the dead count passes
+/// (exit 0), under it fails (exit 1). Classification itself is untouched.
+#[test]
+fn max_dead_budget_gates_exit_code_only() {
+    let dir = fixture_dir("budget");
+
+    // One live key, two dead keys.
+    write(
+        &dir,
+        "locale/en/LC_MESSAGES/messages.po",
+        &format!(
+            "{PO_HEADER}\
+             msgid \"used_key\"\nmsgstr \"Used\"\n\n\
+             msgid \"dead_one\"\nmsgstr \"Dead\"\n\n\
+             msgid \"dead_two\"\nmsgstr \"Dead\"\n"
+        ),
+    );
+    write(&dir, "src/app.js", "i18n('used_key');\n");
+    write(
+        &dir,
+        "dp.toml",
+        "[scan]\n\
+         po_patterns = [\"**/*.po\"]\n\
+         source_extensions = [\"js\"]\n\
+         \n\
+         [[calls]]\n\
+         lang = \"js\"\n\
+         kind = \"function\"\n\
+         name = \"i18n\"\n\
+         \n\
+         [output]\n\
+         fail_on = \"dead\"\n",
+    );
+    let cfg = dir.join("dp.toml");
+
+    // No budget -> any dead fails (exit 1).
+    let (bare_code, bare_json) = run_scan_json(&dir, &cfg);
+    assert_eq!(bare_code, 1);
+    assert_eq!(bare_json["summary"]["dead"], 2);
+
+    // Budget of 2 -> at the cap, within budget (exit 0); dead count unchanged.
+    let (ok_code, ok_json) = run_scan_json_args(&dir, &cfg, &["--max-dead", "2"]);
+    assert_eq!(ok_code, 0, "2 dead within a budget of 2 -> pass");
+    assert_eq!(ok_json["summary"]["dead"], 2, "classification untouched");
+    assert_eq!(ok_json["budget"]["over"], false);
+    assert_eq!(ok_json["budget"]["limit"], 2.0);
+
+    // Budget of 1 -> over budget (exit 1).
+    let (over_code, over_json) = run_scan_json_args(&dir, &cfg, &["--max-dead", "1"]);
+    assert_eq!(over_code, 1, "2 dead over a budget of 1 -> fail");
+    assert_eq!(over_json["budget"]["over"], true);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// Standalone proof: the *same binary* handles a different repo with a different
 /// call convention (PHP `$lang->tr('key')`) and a different PO layout, with no
 /// code changes — only config differs. No example_repo specifics are baked in.
