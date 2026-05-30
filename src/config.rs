@@ -67,6 +67,9 @@ pub enum CallKind {
     Method,
     /// Twig filter: `{{ 'key'|i18n }}`.
     Filter,
+    /// Index access into a translation map: `locale['key']` (JS lang bundles).
+    /// `name` holds the indexed object (`locale`); the subscript is the key.
+    Index,
 }
 
 /// A single translation call site descriptor (`[[calls]]`).
@@ -75,7 +78,8 @@ pub struct CallSpec {
     /// Language this matcher applies to (`php`, `js`, `twig`, ...).
     pub lang: String,
     pub kind: CallKind,
-    /// Function / method / filter name.
+    /// Function / method / filter name — or, for `index`, the indexed object
+    /// identifier (`locale` in `locale['key']`).
     pub name: String,
     /// For `method`: allowed receivers (e.g. `["i18n", "this.i18n"]`). The `$`
     /// and `->`/`.` are normalized away by the extractor.

@@ -221,7 +221,10 @@ fn extract_ast_with(
     let family = lang.family();
     for_each_node(tree.root_node(), |node| match family {
         Family::Php => try_php_call(node, source, calls, min_guard_len, &mut res),
-        Family::Js => try_js_call(node, source, calls, min_guard_len, &mut res),
+        Family::Js => {
+            try_js_call(node, source, calls, min_guard_len, &mut res);
+            try_js_index(node, source, calls, min_guard_len, &mut res);
+        }
         Family::Twig => {}
     });
     res
@@ -437,6 +440,35 @@ fn try_js_call(
     }
 }
 
+/// Index access `obj['key']` (JS `subscript_expression`). Matched when the
+/// object normalizes to the configured `name` (`locale`, `this.locale`, …); the
+/// subscript is decoded by the same literal/guard/blind path as a call argument.
+fn try_js_index(
+    node: Node,
+    src: &str,
+    calls: &[&CallSpec],
+    min_guard_len: usize,
+    res: &mut ExtractResult,
+) {
+    if node.kind() != "subscript_expression" {
+        return;
+    }
+    let (Some(obj), Some(index)) = (
+        node.child_by_field_name("object"),
+        node.child_by_field_name("index"),
+    ) else {
+        return;
+    };
+    let obj_name = normalize_js_receiver(obj, src);
+    if calls
+        .iter()
+        .any(|c| c.kind == CallKind::Index && c.name == obj_name)
+    {
+        let segments = js_segments(index, src);
+        res.record(segments, min_guard_len);
+    }
+}
+
 fn record_js_key_arg(
     call: Node,
     spec: &CallSpec,
@@ -604,6 +636,16 @@ mod tests {
         }
     }
 
+    fn index(lang: &str, name: &str) -> CallSpec {
+        CallSpec {
+            lang: lang.to_string(),
+            kind: CallKind::Index,
+            name: name.to_string(),
+            receiver: None,
+            key_arg_index: 0,
+        }
+    }
+
     fn lit(res: &ExtractResult) -> Vec<String> {
         let mut v: Vec<String> = res.literals.iter().cloned().collect();
         v.sort();
@@ -671,6 +713,26 @@ mod tests {
         let src = "i18n.t('k'); other.t('nope');";
         let res = extract(SourceLang::Js, src, &[method("js", "t", &["i18n"])], 3);
         assert_eq!(lit(&res), vec!["k".to_string()]);
+    }
+
+    #[test]
+    fn js_index_matcher_literal_dynamic_and_mismatch() {
+        // locale['Delete email'] -> literal; locale[varKey] -> blind;
+        // other['x'] -> ignored (object name mismatch).
+        let src = "locale['Delete email']; locale[varKey]; other['x'];";
+        let res = extract(SourceLang::Js, src, &[index("js", "locale")], 3);
+        assert_eq!(lit(&res), vec!["Delete email".to_string()]);
+        assert_eq!(res.blind, 1, "locale[varKey] is a blind site");
+    }
+
+    /// Index access also routes a dynamic-but-prefixed subscript to a guard,
+    /// and matches a member object via the normalized receiver (`this.locale`).
+    #[test]
+    fn js_index_matcher_guard_and_member_object() {
+        let src = "this.locale[`cf_subtype_${k}`];";
+        let res = extract(SourceLang::Js, src, &[index("js", "this.locale")], 3);
+        assert!(res.literals.is_empty());
+        assert_eq!(res.guards, vec![Guard::Prefix("cf_subtype_".to_string())]);
     }
 
     #[test]
