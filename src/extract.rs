@@ -86,12 +86,18 @@ enum Family {
 }
 
 /// What one source file contributed: resolved literal keys, keep-alive guards,
-/// and the count of blind (unresolvable) call sites.
+/// the count of blind (unresolvable) call sites, and every static string literal
+/// seen anywhere in the file.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ExtractResult {
     pub literals: HashSet<String>,
     pub guards: Vec<Guard>,
     pub blind: usize,
+    /// Every fully-static string literal seen *anywhere* in the file, not only in
+    /// translation calls. Feeds the `Suspect` tier: a dead-looking key that still
+    /// appears verbatim as a source literal is likely dispatched dynamically
+    /// (data tables, enums, factory lookups) — flag for review, don't bury it.
+    pub source_literals: HashSet<String>,
 }
 
 impl ExtractResult {
@@ -113,6 +119,25 @@ impl ExtractResult {
             if ext.blind {
                 self.blind += 1;
             }
+        }
+    }
+
+    /// Record a string literal seen in the source (any context). Only fully
+    /// static, non-empty literals are kept — a dynamic fragment is useless for an
+    /// exact-msgid match and would only add noise.
+    fn record_source_literal(&mut self, segments: &[Segment]) {
+        if !segments.iter().all(|s| matches!(s, Segment::Static(_))) {
+            return;
+        }
+        let literal: String = segments
+            .iter()
+            .filter_map(|s| match s {
+                Segment::Static(t) => Some(t.as_str()),
+                Segment::Hole => None,
+            })
+            .collect();
+        if !literal.is_empty() {
+            self.source_literals.insert(literal);
         }
     }
 }
@@ -176,10 +201,10 @@ pub fn extract_with_pool(
     calls: &[CallSpec],
     min_guard_len: usize,
 ) -> ExtractResult {
+    // Note: we do *not* early-return when no call spec applies. Source-literal
+    // collection (the `Suspect` tier) must see every file, including pure data
+    // files that hold no translation calls at all (currency tables, enums, …).
     let applicable: Vec<&CallSpec> = calls.iter().filter(|c| call_applies(c, lang)).collect();
-    if applicable.is_empty() {
-        return ExtractResult::default();
-    }
     match lang.family() {
         Family::Twig => extract_twig(source, &applicable),
         _ => match pool.get(lang) {
@@ -219,15 +244,35 @@ fn extract_ast_with(
 
     let mut res = ExtractResult::default();
     let family = lang.family();
-    for_each_node(tree.root_node(), |node| match family {
-        Family::Php => try_php_call(node, source, calls, min_guard_len, &mut res),
-        Family::Js => {
-            try_js_call(node, source, calls, min_guard_len, &mut res);
-            try_js_index(node, source, calls, min_guard_len, &mut res);
+    for_each_node(tree.root_node(), |node| {
+        match family {
+            Family::Php => try_php_call(node, source, calls, min_guard_len, &mut res),
+            Family::Js => {
+                try_js_call(node, source, calls, min_guard_len, &mut res);
+                try_js_index(node, source, calls, min_guard_len, &mut res);
+            }
+            Family::Twig => {}
         }
-        Family::Twig => {}
+        collect_ast_literal(node, family, source, &mut res);
     });
     res
+}
+
+/// Collect a fully-static string literal node into `source_literals`, regardless
+/// of whether it sits inside a translation call (the `Suspect` tier).
+fn collect_ast_literal(node: Node, family: Family, src: &str, res: &mut ExtractResult) {
+    let segments = match family {
+        Family::Php => match node.kind() {
+            "string" | "encapsed_string" => php_segments(node, src),
+            _ => return,
+        },
+        Family::Js => match node.kind() {
+            "string" | "template_string" => js_segments(node, src),
+            _ => return,
+        },
+        Family::Twig => return,
+    };
+    res.record_source_literal(&segments);
 }
 
 /// Iterative pre-order walk over every node.
@@ -359,6 +404,21 @@ fn normalize_php_receiver(node: Node, src: &str) -> String {
                     format!("{}.{}", normalize_php_receiver(obj, src), text(name, src))
                 }
                 _ => text(node, src).trim_start_matches('$').to_string(),
+            }
+        }
+        // The receiver is itself a call returning the i18n object: a factory like
+        // `Container::get_i18n()->get(…)`, `get_i18n()->get(…)`, or
+        // `$x->getI18n()->get(…)`. Normalize to the callee name + `()` so the
+        // config anchors on the factory (`get_i18n()`), not the class it hangs
+        // off — by far the most common PHP convention in real codebases.
+        "function_call_expression" | "scoped_call_expression" | "member_call_expression" => {
+            match node.child_by_field_name(if node.kind() == "function_call_expression" {
+                "function"
+            } else {
+                "name"
+            }) {
+                Some(callee) => format!("{}()", text(callee, src)),
+                None => text(node, src).trim_start_matches('$').to_string(),
             }
         }
         _ => text(node, src).trim_start_matches('$').to_string(),
@@ -578,6 +638,20 @@ fn concat_segments(
 
 fn extract_twig(source: &str, calls: &[&CallSpec]) -> ExtractResult {
     let mut res = ExtractResult::default();
+
+    // Source-literal collection (Suspect tier): every quoted string in the
+    // template, independent of any filter. Interpolated strings (`#{…}`) are not
+    // static and are skipped.
+    let str_re = Regex::new(r#"'([^'\n]*)'|"([^"\n]*)""#).expect("valid string regex");
+    for cap in str_re.captures_iter(source) {
+        if let Some(m) = cap.get(1).or_else(|| cap.get(2)) {
+            let s = m.as_str();
+            if !s.is_empty() && !s.contains("#{") {
+                res.source_literals.insert(s.to_string());
+            }
+        }
+    }
+
     for call in calls.iter().filter(|c| c.kind == CallKind::Filter) {
         let name = regex::escape(&call.name);
         let total_re = Regex::new(&format!(r"\|\s*{name}\b")).expect("valid total regex");
@@ -663,6 +737,16 @@ mod tests {
     fn php_method_matcher_with_receiver() {
         let src = "<?php $i18n->get('k1'); $this->i18n->get('k2'); $other->get('nope'); ?>";
         let res = extract(SourceLang::Php, src, &[method("php", "get", &["i18n", "this.i18n"])], 3);
+        assert_eq!(lit(&res), vec!["k1".to_string(), "k2".to_string()]);
+    }
+
+    /// A factory-call receiver — `Container::get_i18n()->get('k')` and the free
+    /// form `get_i18n()->get('k')` — is normalized to the token `get_i18n()`.
+    #[test]
+    fn php_factory_call_receiver() {
+        let src = "<?php Container::get_i18n()->get('k1'); get_i18n()->get('k2'); \
+                   $other->build()->get('nope'); ?>";
+        let res = extract(SourceLang::Php, src, &[method("php", "get", &["get_i18n()"])], 3);
         assert_eq!(lit(&res), vec!["k1".to_string(), "k2".to_string()]);
     }
 
@@ -757,5 +841,31 @@ mod tests {
         let src = "const e = <div>{i18n('tsx_key')}</div>;";
         let res = extract(SourceLang::Tsx, src, &[func("ts", "i18n")], 3);
         assert_eq!(lit(&res), vec!["tsx_key".to_string()]);
+    }
+
+    /// Source-literal collection (Suspect tier) sees *every* static string,
+    /// including bare data-table values with no translation call, and even when
+    /// no call spec applies to the file. Dynamic strings are excluded.
+    #[test]
+    fn collects_source_literals_outside_calls() {
+        let src = "<?php const X = 'industry_retail_ecommerce'; \
+                   $a = [RPI::T => 'Count of income calls']; \
+                   $b = \"role_$x\"; ?>";
+        // No applicable calls at all — collection must still run.
+        let res = extract(SourceLang::Php, src, &[], 3);
+        assert!(res.source_literals.contains("industry_retail_ecommerce"));
+        assert!(res.source_literals.contains("Count of income calls"));
+        // Interpolated string is not a static literal.
+        assert!(!res.source_literals.iter().any(|s| s.contains("role_")));
+    }
+
+    /// A key passed to a real call is in `literals`; the same scan still records
+    /// it among `source_literals` (harmless — liveness checks literals first).
+    #[test]
+    fn js_source_literals_include_template_and_plain() {
+        let src = "i18n('called_key'); const m = {'bare_key': 1};";
+        let res = extract(SourceLang::Js, src, &[func("js", "i18n")], 3);
+        assert!(res.source_literals.contains("called_key"));
+        assert!(res.source_literals.contains("bare_key"));
     }
 }

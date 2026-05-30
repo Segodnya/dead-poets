@@ -53,7 +53,12 @@ The key universe is the **union of msgids** across every matched PO catalog
     (default `3`) never form a guard — that would keep the whole catalog.
   - `whitelist` — listed in `[whitelist]` (keys only resolvable at runtime:
     DB/config/external).
-- **Dead** — no literal, no guard, not whitelisted. The review list.
+- **Suspect** — not referenced by any modeled call, but the msgid appears
+  verbatim as a string literal *somewhere* in source (a data table, enum, or
+  config array dispatched dynamically, e.g. `LANG_TYPE => 'Count of income
+  calls'`). Not a confirmed use, so not Alive — but not Dead either. A review
+  hint; exit-neutral (never fails CI).
+- **Dead** — no reference of any kind. The removal-review list.
 
 Dynamics dominate real codebases and an AST can't expand them, so the tool
 **biases hard toward keep**: a false "dead" would ship a raw key to production,
@@ -109,7 +114,9 @@ min_guard_len = 3
 
 - `function` — free function, `i18n('key')`.
 - `method` — method with a `receiver` constraint, `$i18n->get('key')`. `$` and
-  `->`/`.` are normalized away (`$this->i18n` → `this.i18n`).
+  `->`/`.` are normalized away (`$this->i18n` → `this.i18n`); a factory-call
+  receiver normalizes to its callee + `()` (`Container::get_i18n()` →
+  `get_i18n()`).
 - `filter` — Twig filter, `{{ 'key'|i18n }}`.
 - `index` — bracket access into a translation map, `locale['key']`.
 

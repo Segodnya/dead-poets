@@ -3,12 +3,14 @@
 //!
 //! Two formats mirror the same buckets:
 //! - **text**: a one-line scope caveat header, the ranked `Dead` list (colored),
-//!   the per-language blind summary, and a count line.
-//! - **json**: `dead` / `alive` (with `alive_via`) / `blind` for machine use.
+//!   the `Suspect` list (literal present but no modeled call), the per-language
+//!   blind summary, and a count line.
+//! - **json**: `dead` / `suspect` / `alive` (with `alive_via`) / `blind`.
 //!
 //! Exit policy is `fail_on`: `never` → 0; `dead` → 1 if any Dead; `dead-or-blind`
-//! → 1 if any Dead or any blind site. Code `2` (operational error) is owned by
-//! the CLI, not this module.
+//! → 1 if any Dead or any blind site. `Suspect` is exit-neutral by design — it is
+//! a review hint, not a failure. Code `2` (operational error) is owned by the
+//! CLI, not this module.
 
 use std::collections::BTreeMap;
 
@@ -37,6 +39,13 @@ fn sorted_dead(report: &LivenessReport) -> Vec<&PoKey> {
     let mut dead: Vec<&PoKey> = report.dead().map(|v| &v.key).collect();
     dead.sort_by(|a, b| (&a.msgctxt, &a.msgid).cmp(&(&b.msgctxt, &b.msgid)));
     dead
+}
+
+/// Suspect keys sorted for stable output.
+fn sorted_suspect(report: &LivenessReport) -> Vec<&PoKey> {
+    let mut suspect: Vec<&PoKey> = report.suspect().map(|v| &v.key).collect();
+    suspect.sort_by(|a, b| (&a.msgctxt, &a.msgid).cmp(&(&b.msgctxt, &b.msgid)));
+    suspect
 }
 
 /// Render a key for display: `[ctxt] msgid (+ plural)`.
@@ -75,13 +84,27 @@ pub fn render_text(report: &LivenessReport) -> String {
         }
     }
 
+    let suspect = sorted_suspect(report);
+    if !suspect.is_empty() {
+        out.push('\n');
+        out.push_str(&format!(
+            "{} {}\n",
+            format!("Suspect ({}):", suspect.len()).bold(),
+            "literal present in source but no modeled call — verify, don't delete".dimmed(),
+        ));
+        for key in &suspect {
+            out.push_str(&format!("  {}\n", display_key(key).yellow()));
+        }
+    }
+
     out.push('\n');
     out.push_str(&blind_line(&report.blind));
     out.push('\n');
     out.push_str(&format!(
-        "Summary: {} keys, {} alive, {} dead, {} blind\n",
+        "Summary: {} keys, {} alive, {} suspect, {} dead, {} blind\n",
         report.verdicts.len(),
         report.alive_count(),
+        report.suspect_count(),
         report.dead_count(),
         report.total_blind(),
     ));
@@ -120,6 +143,7 @@ struct JsonAliveKey {
 struct JsonSummary {
     total: usize,
     alive: usize,
+    suspect: usize,
     dead: usize,
     blind: usize,
 }
@@ -129,6 +153,7 @@ struct JsonReport {
     scope_caveat: &'static str,
     summary: JsonSummary,
     dead: Vec<JsonKey>,
+    suspect: Vec<JsonKey>,
     alive: Vec<JsonAliveKey>,
     blind: BTreeMap<String, usize>,
 }
@@ -136,6 +161,7 @@ struct JsonReport {
 /// Render the JSON report.
 pub fn render_json(report: &LivenessReport) -> Result<String> {
     let dead: Vec<JsonKey> = sorted_dead(report).into_iter().map(JsonKey::from).collect();
+    let suspect: Vec<JsonKey> = sorted_suspect(report).into_iter().map(JsonKey::from).collect();
     let alive: Vec<JsonAliveKey> = report
         .verdicts
         .iter()
@@ -144,7 +170,7 @@ pub fn render_json(report: &LivenessReport) -> Result<String> {
                 key: JsonKey::from(&v.key),
                 alive_via: alive_via_str(via),
             }),
-            Status::Dead => None,
+            Status::Suspect | Status::Dead => None,
         })
         .collect();
 
@@ -153,10 +179,12 @@ pub fn render_json(report: &LivenessReport) -> Result<String> {
         summary: JsonSummary {
             total: report.verdicts.len(),
             alive: report.alive_count(),
+            suspect: report.suspect_count(),
             dead: report.dead_count(),
             blind: report.total_blind(),
         },
         dead,
+        suspect,
         alive,
         blind: report.blind.clone(),
     };
@@ -247,6 +275,37 @@ mod tests {
         // blind summary mirrored
         assert_eq!(parsed["blind"]["js"], 2);
         assert_eq!(parsed["summary"]["dead"], 2);
+    }
+
+    /// Suspect keys get their own labelled section (text) and bucket (json),
+    /// are excluded from `alive`, and do not affect the exit code.
+    #[test]
+    fn suspect_rendered_and_exit_neutral() {
+        let report = LivenessReport {
+            verdicts: vec![
+                KeyVerdict { key: key("suspect_key"), status: Status::Suspect },
+                KeyVerdict { key: key("dead_key"), status: Status::Dead },
+            ],
+            blind: BTreeMap::new(),
+        };
+
+        let text = render_text(&report);
+        assert!(text.contains("Suspect (1)"));
+        assert!(text.contains("suspect_key"));
+        assert!(text.contains("1 suspect"));
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&render_json(&report).unwrap()).unwrap();
+        assert_eq!(parsed["summary"]["suspect"], 1);
+        assert_eq!(parsed["suspect"][0]["msgid"], "suspect_key");
+        assert!(parsed["alive"].as_array().unwrap().is_empty());
+
+        // Suspect alone (no dead) must not fail the default `dead` gate.
+        let suspect_only = LivenessReport {
+            verdicts: vec![KeyVerdict { key: key("s"), status: Status::Suspect }],
+            blind: BTreeMap::new(),
+        };
+        assert_eq!(exit_code(&suspect_only, FailOn::Dead), 0);
     }
 
     #[test]

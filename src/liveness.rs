@@ -1,11 +1,16 @@
 //! Liveness classification (PLAN Addendum 2 §2, §3).
 //!
-//! One classification vocabulary, two real signals — no invented third bucket:
-//! a PO key is **Alive** if it has a literal match **or** a guard match,
-//! otherwise **Dead**. Live keys carry `alive_via` so "alive via guard" (the old
-//! "low confidence") is expressed on the single status axis. A whitelisted key is
-//! Alive via `Whitelist` — the explicit escape hatch for keys static analysis
-//! cannot see (DB/config/external).
+//! Signals, in precedence order — a PO key is **Alive** if it has a whitelist,
+//! literal, or guard match; live keys carry `alive_via` so "alive via guard" (the
+//! old "low confidence") is expressed on the single status axis. A whitelisted
+//! key is Alive via `Whitelist` — the explicit escape hatch for keys static
+//! analysis cannot see (DB/config/external).
+//!
+//! Failing all of those, a key is **Suspect** if its msgid still appears verbatim
+//! as a string literal *somewhere* in the source (just not in a call we model) —
+//! the strong tell of a key dispatched dynamically through a data table, enum, or
+//! factory. It is not a confirmed reference, so it is not `Alive`; but it is not
+//! `Dead` either. Only a key with no reference of any kind is **Dead**.
 //!
 //! The per-language **blind summary** travels alongside and is never hidden.
 
@@ -27,6 +32,9 @@ pub enum AliveVia {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Alive(AliveVia),
+    /// Not referenced by any modeled call, but the msgid appears verbatim as a
+    /// source string literal — likely dispatched dynamically. Verify, don't delete.
+    Suspect,
     Dead,
 }
 
@@ -44,6 +52,9 @@ pub struct Usage {
     pub guards: Vec<Guard>,
     /// Blind call-site counts keyed by language family label.
     pub blind: BTreeMap<String, usize>,
+    /// Every static string literal seen anywhere in the scanned source. Drives
+    /// the `Suspect` tier.
+    pub source_literals: HashSet<String>,
 }
 
 impl Usage {
@@ -55,6 +66,7 @@ impl Usage {
         if result.blind > 0 {
             *self.blind.entry(lang_label.to_string()).or_default() += result.blind;
         }
+        self.source_literals.extend(result.source_literals);
     }
 }
 
@@ -73,12 +85,23 @@ impl LivenessReport {
             .filter(|v| v.status == Status::Dead)
     }
 
+    /// Suspect keys (literal present in source, but no modeled call).
+    pub fn suspect(&self) -> impl Iterator<Item = &KeyVerdict> {
+        self.verdicts
+            .iter()
+            .filter(|v| v.status == Status::Suspect)
+    }
+
     pub fn dead_count(&self) -> usize {
         self.dead().count()
     }
 
+    pub fn suspect_count(&self) -> usize {
+        self.suspect().count()
+    }
+
     pub fn alive_count(&self) -> usize {
-        self.verdicts.len() - self.dead_count()
+        self.verdicts.len() - self.dead_count() - self.suspect_count()
     }
 
     /// Total blind call sites across all languages.
@@ -128,6 +151,9 @@ fn classify_key(key: &PoKey, usage: &Usage, whitelist: &HashSet<String>) -> Stat
         .any(|g| forms.iter().any(|f| g.matches(f)))
     {
         return Status::Alive(AliveVia::Guard);
+    }
+    if forms.iter().any(|f| usage.source_literals.contains(*f)) {
+        return Status::Suspect;
     }
     Status::Dead
 }
@@ -179,6 +205,35 @@ mod tests {
         assert_eq!(verdict("truly_dead"), Status::Dead);
         assert_eq!(report.dead_count(), 1);
         assert_eq!(report.alive_count(), 2);
+    }
+
+    /// A key with no modeled call but whose msgid appears as a source literal is
+    /// `Suspect`, not `Dead` — and a literal/guard hit still wins over Suspect.
+    #[test]
+    fn source_literal_only_is_suspect() {
+        let index = PoIndex::from_keys([
+            key("data_table_key"),
+            key("never_anywhere"),
+            key("also_called"),
+        ]);
+        let mut usage = Usage::default();
+        // `data_table_key` sits as a bare literal; `also_called` is both a real
+        // call literal and a source literal.
+        usage
+            .source_literals
+            .extend(["data_table_key".to_string(), "also_called".to_string()]);
+        usage.literals.insert("also_called".to_string());
+
+        let report = classify(&index, &usage, &HashSet::new());
+        let verdict = |id: &str| {
+            report.verdicts.iter().find(|v| v.key.msgid == id).unwrap().status
+        };
+        assert_eq!(verdict("data_table_key"), Status::Suspect);
+        assert_eq!(verdict("never_anywhere"), Status::Dead);
+        assert_eq!(verdict("also_called"), Status::Alive(AliveVia::Literal));
+        assert_eq!(report.suspect_count(), 1);
+        assert_eq!(report.dead_count(), 1);
+        assert_eq!(report.alive_count(), 1);
     }
 
     /// A whitelisted key is Alive via Whitelist even with no code reference.
