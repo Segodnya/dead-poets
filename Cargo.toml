@@ -1,6 +1,6 @@
 [package]
 name = "dead-poets"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 authors = ["Kira Kurentsov <immortalsteel@gmail.com>"]
 description = "Find unused (dead) gettext PO/POT keys across a polyglot codebase (PHP, Twig, JS/TS) via real AST parsing."

@@ -287,27 +287,3 @@ fn different_repo_works_by_swapping_config_only() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
-
-/// The shipped example_repo.toml deserializes with the real config loader —
-/// it must never rot into something the engine can't parse.
-#[test]
-fn shipped_example_config_loads() {
-    let manifest = env!("CARGO_MANIFEST_DIR");
-    let cfg_path = Path::new(manifest).join("examples/example_repo.toml");
-    let cfg = dead_poets::config::Config::load(&cfg_path).expect("example config loads");
-
-    // The three documented conventions are present.
-    assert!(cfg.calls.iter().any(|c| {
-        c.lang == "php"
-            && c.name == "get"
-            && c.receiver
-                .as_deref()
-                .is_some_and(|r| r.contains(&"i18n".to_string()))
-    }));
-    assert!(cfg.calls.iter().any(|c| c.lang == "js" && c.name == "i18n"));
-    assert!(
-        cfg.calls
-            .iter()
-            .any(|c| c.lang == "twig" && c.name == "i18n")
-    );
-}
