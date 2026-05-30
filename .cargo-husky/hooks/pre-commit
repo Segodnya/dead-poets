@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Mirrors .github/workflows/ci.yml — run the same gates locally before committing.
+# Installed automatically by cargo-husky (see [dev-dependencies] in Cargo.toml).
+set -euo pipefail
+
+echo "▶ rustfmt"
+cargo fmt --all -- --check
+
+echo "▶ clippy"
+cargo clippy --all-targets --all-features -- -D warnings
+
+echo "▶ test"
+cargo test --all-features --workspace
+
+echo "▶ lib without cli feature"
+cargo check --lib --no-default-features
+
+echo "✓ all CI checks passed"

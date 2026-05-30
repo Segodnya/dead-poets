@@ -52,6 +52,11 @@ colored = { version = "3.1.1", optional = true }
 env_logger = { version = "0.11.10", optional = true }
 serde_json = { version = "1.0.150", optional = true }
 
+# Auto-installs the hooks in .cargo-husky/hooks/ into .git/hooks on first build
+# of dev-deps (e.g. `cargo test`), so no manual `git config` step is needed.
+[dev-dependencies]
+cargo-husky = { version = "1.5.0", default-features = false, features = ["user-hooks"] }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
