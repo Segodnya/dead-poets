@@ -215,9 +215,15 @@ fn audit_scores_dead_bucket_without_changing_exit_code() {
     let (audit_code, audit_json) = run_scan_audit_json(&dir, &cfg);
 
     // Classification and exit code are identical with and without --audit.
-    assert_eq!(plain_code, audit_code, "audit must not change the exit code");
+    assert_eq!(
+        plain_code, audit_code,
+        "audit must not change the exit code"
+    );
     assert_eq!(plain_json["summary"]["dead"], audit_json["summary"]["dead"]);
-    assert!(plain_json.get("audit").is_none(), "no audit object without the flag");
+    assert!(
+        plain_json.get("audit").is_none(),
+        "no audit object without the flag"
+    );
 
     // 3 dead keys, one per tier.
     let audit = &audit_json["audit"];
@@ -291,9 +297,17 @@ fn shipped_example_config_loads() {
     let cfg = dead_poets::config::Config::load(&cfg_path).expect("example config loads");
 
     // The three documented conventions are present.
-    assert!(cfg.calls.iter().any(|c| c.lang == "php"
-        && c.name == "get"
-        && c.receiver.as_deref().is_some_and(|r| r.contains(&"i18n".to_string()))));
+    assert!(cfg.calls.iter().any(|c| {
+        c.lang == "php"
+            && c.name == "get"
+            && c.receiver
+                .as_deref()
+                .is_some_and(|r| r.contains(&"i18n".to_string()))
+    }));
     assert!(cfg.calls.iter().any(|c| c.lang == "js" && c.name == "i18n"));
-    assert!(cfg.calls.iter().any(|c| c.lang == "twig" && c.name == "i18n"));
+    assert!(
+        cfg.calls
+            .iter()
+            .any(|c| c.lang == "twig" && c.name == "i18n")
+    );
 }

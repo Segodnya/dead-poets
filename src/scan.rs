@@ -37,10 +37,10 @@ pub fn collect_source_files(
         let ignored = ignored.clone();
         let mut walker = WalkBuilder::new(root);
         walker.filter_entry(move |entry| {
-            if entry.file_type().is_some_and(|t| t.is_dir()) {
-                if let Some(name) = entry.file_name().to_str() {
-                    return !ignored.contains(name);
-                }
+            if entry.file_type().is_some_and(|t| t.is_dir())
+                && let Some(name) = entry.file_name().to_str()
+            {
+                return !ignored.contains(name);
             }
             true
         });
@@ -115,8 +115,9 @@ pub fn aggregate(
 mod tests {
     use super::*;
     use crate::config::{CallKind, CallSpec};
+    use std::path::Path;
 
-    fn write(dir: &PathBuf, name: &str, body: &str) -> PathBuf {
+    fn write(dir: &Path, name: &str, body: &str) -> PathBuf {
         let path = dir.join(name);
         std::fs::write(&path, body).unwrap();
         path
@@ -198,7 +199,11 @@ mod tests {
             ));
             files.push((
                 SourceLang::Twig,
-                write(&dir, &format!("c{i}.twig"), "{{ 'tw'|i18n }} {{ var|i18n }}"),
+                write(
+                    &dir,
+                    &format!("c{i}.twig"),
+                    "{{ 'tw'|i18n }} {{ var|i18n }}",
+                ),
             ));
         }
         files.sort_by(|a, b| a.1.cmp(&b.1));
@@ -240,7 +245,7 @@ mod tests {
         write(&dir.join("vendor"), "ignored.php", "<?php ?>");
 
         let files = collect_source_files(
-            &[dir.clone()],
+            std::slice::from_ref(&dir),
             &["php".to_string(), "twig".to_string()],
             &["vendor".to_string()],
         )

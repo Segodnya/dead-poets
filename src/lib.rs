@@ -8,12 +8,19 @@
 //! nothing about any particular repository.
 
 pub mod audit;
-pub mod cli;
 pub mod config;
 pub mod decode;
 pub mod extract;
 pub mod guard;
 pub mod liveness;
 pub mod po;
-pub mod report;
 pub mod scan;
+
+// CLI front-end: argument parsing (`clap`) and terminal/JSON rendering
+// (`colored` / `serde_json`). Gated behind the `cli` feature so library
+// consumers of the classifier do not pull in terminal dependencies; the
+// `dead-poets` binary requires it.
+#[cfg(feature = "cli")]
+pub mod cli;
+#[cfg(feature = "cli")]
+pub mod report;

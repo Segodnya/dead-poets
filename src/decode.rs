@@ -229,42 +229,78 @@ mod tests {
 
     #[test]
     fn php_single_quote_keeps_backslash_n_literal() {
-        assert_eq!(decode_token(Lang::Php, "'a\\nb'"), Decoded::Literal("a\\nb".to_string()));
-        assert_eq!(decode_token(Lang::Php, "'it\\'s'"), Decoded::Literal("it's".to_string()));
+        assert_eq!(
+            decode_token(Lang::Php, "'a\\nb'"),
+            Decoded::Literal("a\\nb".to_string())
+        );
+        assert_eq!(
+            decode_token(Lang::Php, "'it\\'s'"),
+            Decoded::Literal("it's".to_string())
+        );
     }
 
     #[test]
     fn php_double_quote_decodes_escapes() {
         // "a\nb" -> a, real newline, b
-        assert_eq!(decode_token(Lang::Php, "\"a\\nb\""), Decoded::Literal("a\nb".to_string()));
+        assert_eq!(
+            decode_token(Lang::Php, "\"a\\nb\""),
+            Decoded::Literal("a\nb".to_string())
+        );
     }
 
     #[test]
     fn php_double_quote_with_variable_is_dynamic() {
         assert_eq!(decode_token(Lang::Php, "\"role_$x\""), Decoded::Dynamic);
-        assert_eq!(decode_token(Lang::Php, "\"user_{$role}\""), Decoded::Dynamic);
+        assert_eq!(
+            decode_token(Lang::Php, "\"user_{$role}\""),
+            Decoded::Dynamic
+        );
         // escaped dollar is NOT interpolation
-        assert_eq!(decode_token(Lang::Php, "\"price_\\$5\""), Decoded::Literal("price_$5".to_string()));
+        assert_eq!(
+            decode_token(Lang::Php, "\"price_\\$5\""),
+            Decoded::Literal("price_$5".to_string())
+        );
     }
 
     #[test]
     fn js_plain_and_template_literals() {
-        assert_eq!(decode_token(Lang::Js, "'plain'"), Decoded::Literal("plain".to_string()));
-        assert_eq!(decode_token(Lang::Js, "`plain`"), Decoded::Literal("plain".to_string()));
-        assert_eq!(decode_token(Lang::Js, "\"a\\tb\""), Decoded::Literal("a\tb".to_string()));
+        assert_eq!(
+            decode_token(Lang::Js, "'plain'"),
+            Decoded::Literal("plain".to_string())
+        );
+        assert_eq!(
+            decode_token(Lang::Js, "`plain`"),
+            Decoded::Literal("plain".to_string())
+        );
+        assert_eq!(
+            decode_token(Lang::Js, "\"a\\tb\""),
+            Decoded::Literal("a\tb".to_string())
+        );
     }
 
     #[test]
     fn js_template_with_interpolation_is_dynamic() {
-        assert_eq!(decode_token(Lang::Js, "`cf_subtype_${x}`"), Decoded::Dynamic);
+        assert_eq!(
+            decode_token(Lang::Js, "`cf_subtype_${x}`"),
+            Decoded::Dynamic
+        );
         // escaped ${ is literal
-        assert_eq!(decode_token(Lang::Js, "`cost_\\${x}`"), Decoded::Literal("cost_${x}".to_string()));
+        assert_eq!(
+            decode_token(Lang::Js, "`cost_\\${x}`"),
+            Decoded::Literal("cost_${x}".to_string())
+        );
     }
 
     #[test]
     fn twig_string_literal() {
-        assert_eq!(decode_token(Lang::Twig, "'key'"), Decoded::Literal("key".to_string()));
-        assert_eq!(decode_token(Lang::Twig, "\"key\""), Decoded::Literal("key".to_string()));
+        assert_eq!(
+            decode_token(Lang::Twig, "'key'"),
+            Decoded::Literal("key".to_string())
+        );
+        assert_eq!(
+            decode_token(Lang::Twig, "\"key\""),
+            Decoded::Literal("key".to_string())
+        );
         assert_eq!(decode_token(Lang::Twig, "\"x#{y}\""), Decoded::Dynamic);
     }
 

@@ -67,7 +67,10 @@ fn blind_line(blind: &BTreeMap<String, usize>) -> String {
         return "Blind spots: none".to_string();
     }
     let parts: Vec<String> = blind.iter().map(|(k, v)| format!("{k}={v}")).collect();
-    format!("Blind spots (unverifiable call sites): {}", parts.join(", "))
+    format!(
+        "Blind spots (unverifiable call sites): {}",
+        parts.join(", ")
+    )
 }
 
 fn trace_str(trace: Trace) -> &'static str {
@@ -103,13 +106,20 @@ fn audit_block(audit: &AuditReport) -> String {
 /// Render the text report.
 pub fn render_text(report: &LivenessReport, audit: Option<&AuditReport>) -> String {
     let mut out = String::new();
-    out.push_str(&format!("{} {}\n\n", "dead-poets".bold(), SCOPE_CAVEAT.dimmed()));
+    out.push_str(&format!(
+        "{} {}\n\n",
+        "dead-poets".bold(),
+        SCOPE_CAVEAT.dimmed()
+    ));
 
     let dead = sorted_dead(report);
     if dead.is_empty() {
         out.push_str(&"No dead keys found.\n".green().to_string());
     } else {
-        out.push_str(&format!("{}\n", format!("Dead keys ({}):", dead.len()).bold()));
+        out.push_str(&format!(
+            "{}\n",
+            format!("Dead keys ({}):", dead.len()).bold()
+        ));
         for key in &dead {
             out.push_str(&format!("  {}\n", display_key(key).red()));
         }
@@ -210,7 +220,10 @@ impl From<&AuditReport> for JsonAudit {
             traced: a
                 .traced
                 .iter()
-                .map(|(k, t)| JsonTracedKey { key: JsonKey::from(k), trace: trace_str(*t) })
+                .map(|(k, t)| JsonTracedKey {
+                    key: JsonKey::from(k),
+                    trace: trace_str(*t),
+                })
                 .collect(),
         }
     }
@@ -231,7 +244,10 @@ struct JsonReport {
 /// Render the JSON report.
 pub fn render_json(report: &LivenessReport, audit: Option<&AuditReport>) -> Result<String> {
     let dead: Vec<JsonKey> = sorted_dead(report).into_iter().map(JsonKey::from).collect();
-    let suspect: Vec<JsonKey> = sorted_suspect(report).into_iter().map(JsonKey::from).collect();
+    let suspect: Vec<JsonKey> = sorted_suspect(report)
+        .into_iter()
+        .map(JsonKey::from)
+        .collect();
     let alive: Vec<JsonAliveKey> = report
         .verdicts
         .iter()
@@ -303,10 +319,22 @@ mod tests {
         blind.insert("twig".to_string(), 1);
         LivenessReport {
             verdicts: vec![
-                KeyVerdict { key: key("alive_lit"), status: Status::Alive(AliveVia::Literal) },
-                KeyVerdict { key: key("alive_grd"), status: Status::Alive(AliveVia::Guard) },
-                KeyVerdict { key: key("dead_two"), status: Status::Dead },
-                KeyVerdict { key: key("dead_one"), status: Status::Dead },
+                KeyVerdict {
+                    key: key("alive_lit"),
+                    status: Status::Alive(AliveVia::Literal),
+                },
+                KeyVerdict {
+                    key: key("alive_grd"),
+                    status: Status::Alive(AliveVia::Guard),
+                },
+                KeyVerdict {
+                    key: key("dead_two"),
+                    status: Status::Dead,
+                },
+                KeyVerdict {
+                    key: key("dead_one"),
+                    status: Status::Dead,
+                },
             ],
             blind,
         }
@@ -343,7 +371,10 @@ mod tests {
         // alive carries alive_via
         let alive = parsed["alive"].as_array().unwrap();
         assert_eq!(alive.len(), 2);
-        let vias: Vec<&str> = alive.iter().map(|a| a["alive_via"].as_str().unwrap()).collect();
+        let vias: Vec<&str> = alive
+            .iter()
+            .map(|a| a["alive_via"].as_str().unwrap())
+            .collect();
         assert!(vias.contains(&"literal"));
         assert!(vias.contains(&"guard"));
 
@@ -358,8 +389,14 @@ mod tests {
     fn suspect_rendered_and_exit_neutral() {
         let report = LivenessReport {
             verdicts: vec![
-                KeyVerdict { key: key("suspect_key"), status: Status::Suspect },
-                KeyVerdict { key: key("dead_key"), status: Status::Dead },
+                KeyVerdict {
+                    key: key("suspect_key"),
+                    status: Status::Suspect,
+                },
+                KeyVerdict {
+                    key: key("dead_key"),
+                    status: Status::Dead,
+                },
             ],
             blind: BTreeMap::new(),
         };
@@ -377,7 +414,10 @@ mod tests {
 
         // Suspect alone (no dead) must not fail the default `dead` gate.
         let suspect_only = LivenessReport {
-            verdicts: vec![KeyVerdict { key: key("s"), status: Status::Suspect }],
+            verdicts: vec![KeyVerdict {
+                key: key("s"),
+                status: Status::Suspect,
+            }],
             blind: BTreeMap::new(),
         };
         assert_eq!(exit_code(&suspect_only, FailOn::Dead), 0);
@@ -440,7 +480,10 @@ mod tests {
         // clean of dead but has blind
         let mut blind = BTreeMap::new();
         blind.insert("js".to_string(), 1);
-        let blindish = LivenessReport { verdicts: vec![], blind };
+        let blindish = LivenessReport {
+            verdicts: vec![],
+            blind,
+        };
         assert_eq!(exit_code(&blindish, FailOn::Dead), 0);
         assert_eq!(exit_code(&blindish, FailOn::DeadOrBlind), 1);
     }

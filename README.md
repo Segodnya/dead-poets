@@ -1,5 +1,8 @@
 # dead-poets
 
+[![CI](https://github.com/Segodnya/dead-poets/actions/workflows/ci.yml/badge.svg)](https://github.com/Segodnya/dead-poets/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
 A playful nod to *Dead Poets Society* — here **dead** means dead (unused) keys
 hidden in your gettext PO catalogs.
 
@@ -150,3 +153,8 @@ templates. A key marked `Dead` may still be used outside the scanned code.
 
 **Never auto-delete from this report.** It is a ranked review list — verify each
 key (e.g. in your TMS, the source of truth) before removing it.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option.

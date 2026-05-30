@@ -221,7 +221,10 @@ fn call_applies(call: &CallSpec, lang: SourceLang) -> bool {
         SourceLang::Php => l == "php",
         SourceLang::Twig => l == "twig",
         SourceLang::Js | SourceLang::Jsx | SourceLang::Ts | SourceLang::Tsx => {
-            matches!(l.as_str(), "js" | "jsx" | "ts" | "tsx" | "javascript" | "typescript")
+            matches!(
+                l.as_str(),
+                "js" | "jsx" | "ts" | "tsx" | "javascript" | "typescript"
+            )
         }
     }
 }
@@ -381,10 +384,10 @@ fn php_arg_values(args: Node) -> Vec<Node> {
     for child in args.named_children(&mut cursor) {
         if child.kind() == "argument" {
             let count = child.named_child_count();
-            if count > 0 {
-                if let Some(value) = child.named_child(count as u32 - 1) {
-                    out.push(value);
-                }
+            if count > 0
+                && let Some(value) = child.named_child(count as u32 - 1)
+            {
+                out.push(value);
             }
         }
     }
@@ -490,9 +493,10 @@ fn try_js_call(
             };
             let name = text(prop, src);
             let receiver = normalize_js_receiver(obj, src);
-            if let Some(spec) = calls.iter().find(|c| {
-                c.kind == CallKind::Method && c.name == name && receiver_ok(c, &receiver)
-            }) {
+            if let Some(spec) = calls
+                .iter()
+                .find(|c| c.kind == CallKind::Method && c.name == name && receiver_ok(c, &receiver))
+            {
                 record_js_key_arg(node, spec, src, min_guard_len, res);
             }
         }
@@ -583,9 +587,7 @@ fn js_segments(node: Node, src: &str) -> Vec<Segment> {
             for child in node.named_children(&mut cursor) {
                 match child.kind() {
                     "template_substitution" => segs.push(Segment::Hole),
-                    "escape_sequence" => {
-                        segs.push(Segment::Static(unescape_js(text(child, src))))
-                    }
+                    "escape_sequence" => segs.push(Segment::Static(unescape_js(text(child, src)))),
                     // string_fragment and anything else: raw static text.
                     _ => segs.push(Segment::Static(text(child, src).to_string())),
                 }
@@ -617,11 +619,7 @@ fn binary_operator(node: Node, src: &str) -> Option<String> {
 }
 
 /// Flatten a string concatenation into the segments of its two operands.
-fn concat_segments(
-    node: Node,
-    src: &str,
-    f: fn(Node, &str) -> Vec<Segment>,
-) -> Vec<Segment> {
+fn concat_segments(node: Node, src: &str, f: fn(Node, &str) -> Vec<Segment>) -> Vec<Segment> {
     let mut segs = Vec::new();
     if let Some(left) = node.child_by_field_name("left") {
         segs.extend(f(left, src));
@@ -655,8 +653,8 @@ fn extract_twig(source: &str, calls: &[&CallSpec]) -> ExtractResult {
     for call in calls.iter().filter(|c| c.kind == CallKind::Filter) {
         let name = regex::escape(&call.name);
         let total_re = Regex::new(&format!(r"\|\s*{name}\b")).expect("valid total regex");
-        let lit_re =
-            Regex::new(&format!(r#"['"]([^'"]*)['"]\s*\|\s*{name}\b"#)).expect("valid literal regex");
+        let lit_re = Regex::new(&format!(r#"['"]([^'"]*)['"]\s*\|\s*{name}\b"#))
+            .expect("valid literal regex");
 
         let total = total_re.find_iter(source).count();
         let mut kept = 0;
@@ -736,7 +734,12 @@ mod tests {
     #[test]
     fn php_method_matcher_with_receiver() {
         let src = "<?php $i18n->get('k1'); $this->i18n->get('k2'); $other->get('nope'); ?>";
-        let res = extract(SourceLang::Php, src, &[method("php", "get", &["i18n", "this.i18n"])], 3);
+        let res = extract(
+            SourceLang::Php,
+            src,
+            &[method("php", "get", &["i18n", "this.i18n"])],
+            3,
+        );
         assert_eq!(lit(&res), vec!["k1".to_string(), "k2".to_string()]);
     }
 
@@ -746,7 +749,12 @@ mod tests {
     fn php_factory_call_receiver() {
         let src = "<?php Container::get_i18n()->get('k1'); get_i18n()->get('k2'); \
                    $other->build()->get('nope'); ?>";
-        let res = extract(SourceLang::Php, src, &[method("php", "get", &["get_i18n()"])], 3);
+        let res = extract(
+            SourceLang::Php,
+            src,
+            &[method("php", "get", &["get_i18n()"])],
+            3,
+        );
         assert_eq!(lit(&res), vec!["k1".to_string(), "k2".to_string()]);
     }
 

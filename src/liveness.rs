@@ -80,16 +80,12 @@ pub struct LivenessReport {
 impl LivenessReport {
     /// Dead keys, in the order keys were classified.
     pub fn dead(&self) -> impl Iterator<Item = &KeyVerdict> {
-        self.verdicts
-            .iter()
-            .filter(|v| v.status == Status::Dead)
+        self.verdicts.iter().filter(|v| v.status == Status::Dead)
     }
 
     /// Suspect keys (literal present in source, but no modeled call).
     pub fn suspect(&self) -> impl Iterator<Item = &KeyVerdict> {
-        self.verdicts
-            .iter()
-            .filter(|v| v.status == Status::Suspect)
+        self.verdicts.iter().filter(|v| v.status == Status::Suspect)
     }
 
     pub fn dead_count(&self) -> usize {
@@ -226,7 +222,12 @@ mod tests {
 
         let report = classify(&index, &usage, &HashSet::new());
         let verdict = |id: &str| {
-            report.verdicts.iter().find(|v| v.key.msgid == id).unwrap().status
+            report
+                .verdicts
+                .iter()
+                .find(|v| v.key.msgid == id)
+                .unwrap()
+                .status
         };
         assert_eq!(verdict("data_table_key"), Status::Suspect);
         assert_eq!(verdict("never_anywhere"), Status::Dead);
@@ -244,7 +245,10 @@ mod tests {
         let whitelist: HashSet<String> = ["dynamic.from.db".to_string()].into_iter().collect();
 
         let report = classify(&index, &usage, &whitelist);
-        assert_eq!(report.verdicts[0].status, Status::Alive(AliveVia::Whitelist));
+        assert_eq!(
+            report.verdicts[0].status,
+            Status::Alive(AliveVia::Whitelist)
+        );
     }
 
     /// A plural key is Alive if either form is referenced.
@@ -262,9 +266,27 @@ mod tests {
     #[test]
     fn blind_summary_aggregates_per_language() {
         let mut usage = Usage::default();
-        usage.add("js", ExtractResult { blind: 1, ..Default::default() });
-        usage.add("js", ExtractResult { blind: 1, ..Default::default() });
-        usage.add("twig", ExtractResult { blind: 1, ..Default::default() });
+        usage.add(
+            "js",
+            ExtractResult {
+                blind: 1,
+                ..Default::default()
+            },
+        );
+        usage.add(
+            "js",
+            ExtractResult {
+                blind: 1,
+                ..Default::default()
+            },
+        );
+        usage.add(
+            "twig",
+            ExtractResult {
+                blind: 1,
+                ..Default::default()
+            },
+        );
 
         let report = classify(&PoIndex::from_keys([]), &usage, &HashSet::new());
         assert_eq!(report.blind.get("js"), Some(&2));

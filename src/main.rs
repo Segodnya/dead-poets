@@ -11,7 +11,13 @@ use dead_poets::{audit, liveness, po, report, scan};
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Scan { path, config, format, verbose, audit } => {
+        Commands::Scan {
+            path,
+            config,
+            format,
+            verbose,
+            audit,
+        } => {
             init_logging(verbose);
             match run_scan(&path, &config, &format, audit) {
                 Ok(code) => ExitCode::from(code as u8),
@@ -102,7 +108,10 @@ fn run_scan(path: &str, config_path: &str, format_str: &str, run_audit: bool) ->
         None
     };
 
-    print!("{}", report::render(&result, audit_report.as_ref(), format)?);
+    print!(
+        "{}",
+        report::render(&result, audit_report.as_ref(), format)?
+    );
 
     Ok(report::exit_code(&result, cfg.output.fail_on))
 }

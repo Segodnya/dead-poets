@@ -55,9 +55,9 @@ impl PoIndex {
 
     /// Whether any key carries this exact msgid (singular or plural form).
     pub fn contains_msgid(&self, msgid: &str) -> bool {
-        self.keys.iter().any(|k| {
-            k.msgid == msgid || k.msgid_plural.as_deref() == Some(msgid)
-        })
+        self.keys
+            .iter()
+            .any(|k| k.msgid == msgid || k.msgid_plural.as_deref() == Some(msgid))
     }
 }
 
@@ -86,10 +86,10 @@ pub fn collect_po_files(
         let mut walker = WalkBuilder::new(root);
         walker.filter_entry(move |entry| {
             // Prune ignored directories by name; always keep files.
-            if entry.file_type().is_some_and(|t| t.is_dir()) {
-                if let Some(name) = entry.file_name().to_str() {
-                    return !ignored.contains(name);
-                }
+            if entry.file_type().is_some_and(|t| t.is_dir())
+                && let Some(name) = entry.file_name().to_str()
+            {
+                return !ignored.contains(name);
             }
             true
         });
@@ -214,7 +214,9 @@ mod tests {
         write(
             &dir,
             "de/LC_MESSAGES/messages.po",
-            &format!("{HEADER}msgid \"shared\"\nmsgstr \"geteilt\"\n\nmsgid \"only_de\"\nmsgstr \"nur\"\n"),
+            &format!(
+                "{HEADER}msgid \"shared\"\nmsgstr \"geteilt\"\n\nmsgid \"only_de\"\nmsgstr \"nur\"\n"
+            ),
         );
         write(
             &dir,
@@ -224,12 +226,8 @@ mod tests {
             ),
         );
 
-        let files = collect_po_files(
-            &[dir.clone()],
-            &["**/*.po".to_string()],
-            &[],
-        )
-        .unwrap();
+        let files =
+            collect_po_files(std::slice::from_ref(&dir), &["**/*.po".to_string()], &[]).unwrap();
         assert_eq!(files.len(), 3, "all three locale files collected");
 
         let refs: Vec<&Path> = files.iter().map(|p| p.as_path()).collect();
@@ -277,7 +275,11 @@ mod tests {
     #[test]
     fn msgids_are_decoded() {
         let dir = temp_dir("decode");
-        let file = write(&dir, "messages.po", &format!("{HEADER}msgid \"a\\nb\"\nmsgstr \"x\"\n"));
+        let file = write(
+            &dir,
+            "messages.po",
+            &format!("{HEADER}msgid \"a\\nb\"\nmsgstr \"x\"\n"),
+        );
         let index = build_index(&[file.as_path()]).unwrap();
 
         let key = index.keys().next().unwrap();

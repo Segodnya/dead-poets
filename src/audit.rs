@@ -251,7 +251,7 @@ mod tests {
 
         let report = audit(
             &dead,
-            &[dir.clone()],
+            std::slice::from_ref(&dir),
             &["php".to_string()],
             &[],
             3,
@@ -263,7 +263,13 @@ mod tests {
         assert_eq!(report.skeleton, 1);
         assert_eq!(report.no_trace, 1);
 
-        let tier = |id: &str| report.traced.iter().find(|(k, _)| k.msgid == id).map(|(_, t)| *t);
+        let tier = |id: &str| {
+            report
+                .traced
+                .iter()
+                .find(|(k, _)| k.msgid == id)
+                .map(|(_, t)| *t)
+        };
         assert_eq!(tier("Verbatim dead phrase"), Some(Trace::Substring));
         assert_eq!(tier("Deleted %d contacts"), Some(Trace::Skeleton));
         // None-trace keys are omitted from the recheck list.
@@ -280,7 +286,14 @@ mod tests {
         std::fs::write(dir.join("t.php"), "<?php $m = 'Deleted %d contacts'; ?>").unwrap();
 
         let k = key("Deleted %d contacts");
-        let report = audit(&[&k], &[dir.clone()], &["php".to_string()], &[], 3).unwrap();
+        let report = audit(
+            &[&k],
+            std::slice::from_ref(&dir),
+            &["php".to_string()],
+            &[],
+            3,
+        )
+        .unwrap();
         assert_eq!(report.substring, 1);
         assert_eq!(report.skeleton, 0);
 
@@ -307,7 +320,16 @@ mod tests {
                 .num_threads(threads)
                 .build()
                 .unwrap()
-                .install(|| audit(&dead, &[dir.clone()], &["php".to_string()], &[], 3).unwrap())
+                .install(|| {
+                    audit(
+                        &dead,
+                        std::slice::from_ref(&dir),
+                        &["php".to_string()],
+                        &[],
+                        3,
+                    )
+                    .unwrap()
+                })
         };
         let single = run(1);
         let multi = run(4);

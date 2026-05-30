@@ -156,8 +156,8 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("cannot read config file: {}", path.display()))?;
-        let cfg: Config = toml::from_str(&text)
-            .with_context(|| format!("invalid config: {}", path.display()))?;
+        let cfg: Config =
+            toml::from_str(&text).with_context(|| format!("invalid config: {}", path.display()))?;
         Ok(cfg)
     }
 }
@@ -261,8 +261,7 @@ mod tests {
     /// `dead-or-blind` is a valid fail_on value (kebab-case mapping).
     #[test]
     fn fail_on_kebab_case_roundtrips() {
-        let cfg: Config =
-            toml::from_str("[output]\nfail_on = \"dead-or-blind\"").unwrap();
+        let cfg: Config = toml::from_str("[output]\nfail_on = \"dead-or-blind\"").unwrap();
         assert_eq!(cfg.output.fail_on, FailOn::DeadOrBlind);
     }
 
@@ -301,9 +300,11 @@ mod tests {
             file: Some("nope.txt".to_string()),
             keys: vec![],
         };
-        let err = resolve_whitelist(&wl, Path::new("/tmp/definitely-missing-dir-xyz"))
-            .unwrap_err();
+        let err = resolve_whitelist(&wl, Path::new("/tmp/definitely-missing-dir-xyz")).unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("nope.txt"), "error should name the path: {msg}");
+        assert!(
+            msg.contains("nope.txt"),
+            "error should name the path: {msg}"
+        );
     }
 }

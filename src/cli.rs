@@ -45,7 +45,13 @@ mod tests {
     fn parses_scan_args() {
         let cli = Cli::try_parse_from(["dead-poets", "scan", "./proj", "--format", "json", "-vv"])
             .unwrap();
-        let Commands::Scan { path, config, format, verbose, audit } = cli.command;
+        let Commands::Scan {
+            path,
+            config,
+            format,
+            verbose,
+            audit,
+        } = cli.command;
         assert_eq!(path, "./proj");
         assert_eq!(config, "dead-poets.toml");
         assert_eq!(format, "json");
@@ -65,7 +71,13 @@ mod tests {
     #[test]
     fn defaults_match_plan() {
         let cli = Cli::try_parse_from(["dead-poets", "scan"]).unwrap();
-        let Commands::Scan { path, config, format, verbose, audit } = cli.command;
+        let Commands::Scan {
+            path,
+            config,
+            format,
+            verbose,
+            audit,
+        } = cli.command;
         assert_eq!(path, ".");
         assert_eq!(config, "dead-poets.toml");
         assert_eq!(format, "text");

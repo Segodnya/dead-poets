@@ -105,7 +105,10 @@ mod tests {
     fn trailing_fragment_becomes_suffix() {
         let segs = [Segment::Hole, s("_delete_confirm_1")];
         let ext = guards_from_segments(&segs, 3);
-        assert_eq!(ext.guards, vec![Guard::Suffix("_delete_confirm_1".to_string())]);
+        assert_eq!(
+            ext.guards,
+            vec![Guard::Suffix("_delete_confirm_1".to_string())]
+        );
         assert!(!ext.blind);
     }
 
