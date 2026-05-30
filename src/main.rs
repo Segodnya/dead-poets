@@ -6,14 +6,14 @@ use clap::Parser;
 
 use dead_poets::cli::{Cli, Commands};
 use dead_poets::config::{Config, OutputFormat, resolve_whitelist};
-use dead_poets::{liveness, po, report, scan};
+use dead_poets::{audit, liveness, po, report, scan};
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Scan { path, config, format, verbose } => {
+        Commands::Scan { path, config, format, verbose, audit } => {
             init_logging(verbose);
-            match run_scan(&path, &config, &format) {
+            match run_scan(&path, &config, &format, audit) {
                 Ok(code) => ExitCode::from(code as u8),
                 // Operational failure (bad config, no PO files, walk error) -> 2.
                 Err(err) => {
@@ -45,7 +45,7 @@ fn parse_format(s: &str) -> Result<OutputFormat> {
 
 /// Run the full pipeline. Returns the report-driven exit code (0/1); any error
 /// is mapped to exit code 2 by the caller.
-fn run_scan(path: &str, config_path: &str, format_str: &str) -> Result<i32> {
+fn run_scan(path: &str, config_path: &str, format_str: &str, run_audit: bool) -> Result<i32> {
     let format = parse_format(format_str)?;
     let config_path = Path::new(config_path);
     let cfg = Config::load(config_path)?;
@@ -85,7 +85,24 @@ fn run_scan(path: &str, config_path: &str, format_str: &str) -> Result<i32> {
     );
 
     let result = liveness::classify(&index, &usage, &whitelist);
-    print!("{}", report::render(&result, format)?);
+
+    // Opt-in advisory pass: grep the Dead bucket against raw source for a trust
+    // score. Never touches classification or the exit code.
+    let audit_report = if run_audit {
+        let dead: Vec<&po::PoKey> = result.dead().map(|v| &v.key).collect();
+        log::info!("auditing {} dead keys against raw source", dead.len());
+        Some(audit::audit(
+            &dead,
+            &roots,
+            &cfg.scan.source_extensions,
+            &cfg.scan.ignore_dirs,
+            cfg.output.min_guard_len,
+        )?)
+    } else {
+        None
+    };
+
+    print!("{}", report::render(&result, audit_report.as_ref(), format)?);
 
     Ok(report::exit_code(&result, cfg.output.fail_on))
 }

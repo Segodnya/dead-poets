@@ -7,6 +7,7 @@
 //! Everything project-specific lives in `dead-poets.toml`; the engine knows
 //! nothing about any particular repository.
 
+pub mod audit;
 pub mod cli;
 pub mod config;
 pub mod decode;

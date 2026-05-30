@@ -22,13 +22,15 @@ cargo build --release
 ## Usage
 
 ```sh
-dead-poets scan <path> --config dead-poets.toml [--format text|json] [-v]
+dead-poets scan <path> --config dead-poets.toml [--format text|json] [-v] [--audit]
 ```
 
 - `path` — project root to scan (default `.`).
 - `--config, -c` — config file (default `dead-poets.toml`).
 - `--format, -f` — `text` (colored review list) or `json` (for CI).
 - `--verbose, -v` — repeatable (`-v`, `-vv`, ...).
+- `--audit` — score the Dead bucket against raw source (see *Auditing the Dead
+  bucket* below). Advisory: it never changes classification or the exit code.
 
 Exit codes (CI gate by default):
 
@@ -66,6 +68,25 @@ while missing a truly-dead key costs nothing.
 
 A call with no static part at all (`i18n($x)`) is a **blind spot** — it can't be
 verified. Blind sites are counted per language and always reported, never hidden.
+
+## Auditing the Dead bucket
+
+`--audit` answers a separate question: *how much do you trust the Dead list?* It
+greps every dead msgid against the **raw source** (not just AST string literals —
+also comments, HTML text, heredocs, and substrings of larger strings) and buckets
+each dead key by the strongest residual trace it leaves:
+
+- **substring** — the full msgid occurs verbatim somewhere in source.
+- **skeleton** — only for keys carrying `%s`/`%d`/`%1$s`/`{0}` placeholders, and
+  only when there is no substring hit: stripping the placeholders yields static
+  fragments (each ≥ `min_guard_len`) that *all* appear in source — the mark of a
+  `sprintf`-assembled key.
+- **none** — no trace of any kind: high-confidence dead.
+
+The pass is **advisory** — it never reclassifies a key and never affects the exit
+code; it just prints a trust line (and, in `--format json`, an `audit` object
+listing the traced keys to recheck). Matching is case-sensitive. The pass only
+runs when `--audit` is given, so the default scan carries zero overhead.
 
 ## Configuration
 
@@ -119,9 +140,6 @@ min_guard_len = 3
   `get_i18n()`).
 - `filter` — Twig filter, `{{ 'key'|i18n }}`.
 - `index` — bracket access into a translation map, `locale['key']`.
-
-A runnable, documented config for a real repo lives in
-[`examples/example_repo.toml`](examples/example_repo.toml).
 
 ## Scope & safety
 

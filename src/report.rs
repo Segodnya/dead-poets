@@ -18,6 +18,7 @@ use anyhow::Result;
 use colored::Colorize;
 use serde::Serialize;
 
+use crate::audit::{AuditReport, Trace};
 use crate::config::{FailOn, OutputFormat};
 use crate::liveness::{AliveVia, LivenessReport, Status};
 use crate::po::PoKey;
@@ -69,8 +70,38 @@ fn blind_line(blind: &BTreeMap<String, usize>) -> String {
     format!("Blind spots (unverifiable call sites): {}", parts.join(", "))
 }
 
+fn trace_str(trace: Trace) -> &'static str {
+    match trace {
+        Trace::Substring => "substring",
+        Trace::Skeleton => "skeleton",
+        Trace::None => "none",
+    }
+}
+
+/// The advisory dead-bucket trust block (text). One headline number plus a
+/// pointer to the full recheck list, which lives in the JSON output.
+fn audit_block(audit: &AuditReport) -> String {
+    let mut s = String::new();
+    s.push_str(&format!(
+        "Audit (dead-bucket trust): {} dead — {} no trace (high-confidence), {} substring, {} skeleton — recheck before deleting.\n",
+        audit.dead_total, audit.no_trace, audit.substring, audit.skeleton,
+    ));
+    if !audit.traced.is_empty() {
+        s.push_str(
+            &format!(
+                "  {} dead keys still trace to source — see --format json for the list.",
+                audit.traced.len()
+            )
+            .dimmed()
+            .to_string(),
+        );
+        s.push('\n');
+    }
+    s
+}
+
 /// Render the text report.
-pub fn render_text(report: &LivenessReport) -> String {
+pub fn render_text(report: &LivenessReport, audit: Option<&AuditReport>) -> String {
     let mut out = String::new();
     out.push_str(&format!("{} {}\n\n", "dead-poets".bold(), SCOPE_CAVEAT.dimmed()));
 
@@ -108,6 +139,11 @@ pub fn render_text(report: &LivenessReport) -> String {
         report.dead_count(),
         report.total_blind(),
     ));
+
+    if let Some(audit) = audit {
+        out.push('\n');
+        out.push_str(&audit_block(audit));
+    }
     out
 }
 
@@ -149,6 +185,38 @@ struct JsonSummary {
 }
 
 #[derive(Serialize)]
+struct JsonTracedKey {
+    #[serde(flatten)]
+    key: JsonKey,
+    trace: &'static str,
+}
+
+#[derive(Serialize)]
+struct JsonAudit {
+    dead_total: usize,
+    no_trace: usize,
+    substring: usize,
+    skeleton: usize,
+    traced: Vec<JsonTracedKey>,
+}
+
+impl From<&AuditReport> for JsonAudit {
+    fn from(a: &AuditReport) -> Self {
+        JsonAudit {
+            dead_total: a.dead_total,
+            no_trace: a.no_trace,
+            substring: a.substring,
+            skeleton: a.skeleton,
+            traced: a
+                .traced
+                .iter()
+                .map(|(k, t)| JsonTracedKey { key: JsonKey::from(k), trace: trace_str(*t) })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
 struct JsonReport {
     scope_caveat: &'static str,
     summary: JsonSummary,
@@ -156,10 +224,12 @@ struct JsonReport {
     suspect: Vec<JsonKey>,
     alive: Vec<JsonAliveKey>,
     blind: BTreeMap<String, usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audit: Option<JsonAudit>,
 }
 
 /// Render the JSON report.
-pub fn render_json(report: &LivenessReport) -> Result<String> {
+pub fn render_json(report: &LivenessReport, audit: Option<&AuditReport>) -> Result<String> {
     let dead: Vec<JsonKey> = sorted_dead(report).into_iter().map(JsonKey::from).collect();
     let suspect: Vec<JsonKey> = sorted_suspect(report).into_iter().map(JsonKey::from).collect();
     let alive: Vec<JsonAliveKey> = report
@@ -187,15 +257,20 @@ pub fn render_json(report: &LivenessReport) -> Result<String> {
         suspect,
         alive,
         blind: report.blind.clone(),
+        audit: audit.map(JsonAudit::from),
     };
     Ok(serde_json::to_string_pretty(&json)?)
 }
 
 /// Render in the requested format.
-pub fn render(report: &LivenessReport, format: OutputFormat) -> Result<String> {
+pub fn render(
+    report: &LivenessReport,
+    audit: Option<&AuditReport>,
+    format: OutputFormat,
+) -> Result<String> {
     match format {
-        OutputFormat::Text => Ok(render_text(report)),
-        OutputFormat::Json => render_json(report),
+        OutputFormat::Text => Ok(render_text(report, audit)),
+        OutputFormat::Json => render_json(report, audit),
     }
 }
 
@@ -239,7 +314,7 @@ mod tests {
 
     #[test]
     fn text_prints_only_dead_and_scope_header() {
-        let text = render_text(&report());
+        let text = render_text(&report(), None);
         // header carries the scope caveat
         assert!(text.contains("external consumers"));
         // both dead keys present, sorted
@@ -257,7 +332,7 @@ mod tests {
     #[test]
     fn json_is_valid_and_dead_count_matches_text() {
         let r = report();
-        let json = render_json(&r).unwrap();
+        let json = render_json(&r, None).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         // dead bucket count matches the report
@@ -289,13 +364,13 @@ mod tests {
             blind: BTreeMap::new(),
         };
 
-        let text = render_text(&report);
+        let text = render_text(&report, None);
         assert!(text.contains("Suspect (1)"));
         assert!(text.contains("suspect_key"));
         assert!(text.contains("1 suspect"));
 
         let parsed: serde_json::Value =
-            serde_json::from_str(&render_json(&report).unwrap()).unwrap();
+            serde_json::from_str(&render_json(&report, None).unwrap()).unwrap();
         assert_eq!(parsed["summary"]["suspect"], 1);
         assert_eq!(parsed["suspect"][0]["msgid"], "suspect_key");
         assert!(parsed["alive"].as_array().unwrap().is_empty());
@@ -306,6 +381,42 @@ mod tests {
             blind: BTreeMap::new(),
         };
         assert_eq!(exit_code(&suspect_only, FailOn::Dead), 0);
+    }
+
+    /// With an `AuditReport` attached, the trust block appears in text and the
+    /// `audit` object in JSON; the exit code is unaffected.
+    #[test]
+    fn audit_rendered_and_exit_neutral() {
+        let r = report(); // 2 dead
+        let audit = AuditReport {
+            dead_total: 2,
+            no_trace: 1,
+            substring: 1,
+            skeleton: 0,
+            traced: vec![(key("dead_one"), Trace::Substring)],
+        };
+
+        let text = render_text(&r, Some(&audit));
+        assert!(text.contains("Audit (dead-bucket trust): 2 dead"));
+        assert!(text.contains("1 no trace"));
+        assert!(text.contains("1 substring"));
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&render_json(&r, Some(&audit)).unwrap()).unwrap();
+        assert_eq!(parsed["audit"]["dead_total"], 2);
+        assert_eq!(parsed["audit"]["no_trace"], 1);
+        assert_eq!(parsed["audit"]["substring"], 1);
+        assert_eq!(parsed["audit"]["traced"][0]["msgid"], "dead_one");
+        assert_eq!(parsed["audit"]["traced"][0]["trace"], "substring");
+
+        // No audit -> no block, no json key.
+        assert!(!render_text(&r, None).contains("Audit (dead-bucket trust)"));
+        let no_audit: serde_json::Value =
+            serde_json::from_str(&render_json(&r, None).unwrap()).unwrap();
+        assert!(no_audit.get("audit").is_none());
+
+        // Audit never changes the exit code.
+        assert_eq!(exit_code(&r, FailOn::Dead), 1);
     }
 
     #[test]

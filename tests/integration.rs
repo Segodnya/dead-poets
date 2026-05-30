@@ -142,6 +142,106 @@ fn example_repo_shape_produces_all_four_outcomes() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Run the binary `scan --audit`; return (exit_code, parsed_json_stdout).
+fn run_scan_audit_json(root: &Path, config: &Path) -> (i32, serde_json::Value) {
+    let output = Command::new(BIN)
+        .arg("scan")
+        .arg(root)
+        .arg("--config")
+        .arg(config)
+        .arg("--format")
+        .arg("json")
+        .arg("--audit")
+        .output()
+        .expect("binary runs");
+    let code = output.status.code().expect("process exited normally");
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let json = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout is not valid JSON ({e}):\n{stdout}"));
+    (code, json)
+}
+
+/// `--audit` buckets the Dead list by residual source trace (substring /
+/// skeleton / none) and is advisory: classification and exit code are unchanged.
+#[test]
+fn audit_scores_dead_bucket_without_changing_exit_code() {
+    let dir = fixture_dir("audit");
+
+    // Three dead keys, one of each trace tier, plus a live one.
+    write(
+        &dir,
+        "locale/en/LC_MESSAGES/messages.po",
+        &format!(
+            "{PO_HEADER}\
+             msgid \"used_lit\"\nmsgstr \"x\"\n\n\
+             msgid \"Ghost phrase here\"\nmsgstr \"x\"\n\n\
+             msgid \"Deleted %d rows\"\nmsgstr \"x\"\n\n\
+             msgid \"Nowhere at all\"\nmsgstr \"x\"\n"
+        ),
+    );
+
+    // - used_lit: real call -> alive (out of the dead bucket).
+    // - "Ghost phrase here": only in a comment -> substring (not an AST literal,
+    //   so it is dead, but raw grep finds it).
+    // - "Deleted %d rows": assembled by concatenation -> skeleton (fragments
+    //   'Deleted ' and ' rows' present; the full msgid is not).
+    // - "Nowhere at all": absent -> no trace.
+    write(
+        &dir,
+        "src/app.js",
+        "i18n('used_lit');\n\
+         // Ghost phrase here is only mentioned in this comment\n\
+         const s = 'Deleted ' + n + ' rows';\n",
+    );
+
+    write(
+        &dir,
+        "dp.toml",
+        "[scan]\n\
+         po_patterns = [\"**/*.po\"]\n\
+         source_extensions = [\"js\"]\n\
+         \n\
+         [[calls]]\n\
+         lang = \"js\"\n\
+         kind = \"function\"\n\
+         name = \"i18n\"\n\
+         \n\
+         [output]\n\
+         fail_on = \"dead\"\n",
+    );
+
+    let cfg = dir.join("dp.toml");
+    let (plain_code, plain_json) = run_scan_json(&dir, &cfg);
+    let (audit_code, audit_json) = run_scan_audit_json(&dir, &cfg);
+
+    // Classification and exit code are identical with and without --audit.
+    assert_eq!(plain_code, audit_code, "audit must not change the exit code");
+    assert_eq!(plain_json["summary"]["dead"], audit_json["summary"]["dead"]);
+    assert!(plain_json.get("audit").is_none(), "no audit object without the flag");
+
+    // 3 dead keys, one per tier.
+    let audit = &audit_json["audit"];
+    assert_eq!(audit["dead_total"], 3);
+    assert_eq!(audit["substring"], 1);
+    assert_eq!(audit["skeleton"], 1);
+    assert_eq!(audit["no_trace"], 1);
+
+    // The recheck list names the traced keys with their tier; the no-trace key
+    // is omitted (it stays in the actionable Dead list).
+    let traced = audit["traced"].as_array().unwrap();
+    let tier = |id: &str| {
+        traced
+            .iter()
+            .find(|t| t["msgid"] == id)
+            .map(|t| t["trace"].as_str().unwrap())
+    };
+    assert_eq!(tier("Ghost phrase here"), Some("substring"));
+    assert_eq!(tier("Deleted %d rows"), Some("skeleton"));
+    assert_eq!(tier("Nowhere at all"), None);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// Standalone proof: the *same binary* handles a different repo with a different
 /// call convention (PHP `$lang->tr('key')`) and a different PO layout, with no
 /// code changes — only config differs. No example_repo specifics are baked in.
