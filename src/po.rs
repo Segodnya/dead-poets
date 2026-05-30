@@ -33,6 +33,13 @@ pub struct PoIndex {
 }
 
 impl PoIndex {
+    /// Build an index directly from keys (used by tests and any in-memory caller).
+    pub fn from_keys(keys: impl IntoIterator<Item = PoKey>) -> Self {
+        Self {
+            keys: keys.into_iter().collect(),
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.keys.len()
     }
