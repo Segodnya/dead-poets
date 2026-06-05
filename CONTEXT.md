@@ -15,8 +15,8 @@ is the index and the cross-module vocabulary.
   verbatim as a source literal but no modeled call references it. Dead = no
   reference of any kind.
 - **Guard** — a static fragment of a dynamic key (`i18n(`cf_${x}`)` → prefix
-  `cf_`) that keeps every matching key Alive (`guard`). Never shorter than
-  `min_guard_len`.
+  `cf_`) that keeps every matching key Alive (`guard`). Never shorter than the
+  `[guard] min_len` config knob (the `min_guard_len` threshold internally).
 - **Blind spot** — a call site with no resolvable static fragment (`i18n($x)`).
   Counted per language family, never hidden.
 - **CallSpec** — one `[[calls]]` convention: a `(lang, kind, name, receiver?,
@@ -29,6 +29,13 @@ is the index and the cross-module vocabulary.
 
 ## Architecture seams
 
+- **engine::run** — the single library entry point (`engine`): a config-file path
+  and a project root in, an `Outcome` (loaded config + `LivenessReport` + optional
+  audit) out. Owns every path-resolution convention (whitelist relative to the
+  config dir, source roots relative to the project) and the whole pipeline (`po` →
+  `scan` → `liveness` → optional `audit`), so no caller — the CLI or any library
+  consumer — replicates the wiring. Returns data only: the dead-key budget, output
+  format, and exit gate stay with the caller (`main`).
 - **AstMatcher** — the per-language adapter seam in `extract` (`Php`, `Js`). Each
   adapter exposes only what varies per grammar: `classify` a node into a
   **CallShape**, `segments` (decode a value node), and `literal` (recognise a

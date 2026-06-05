@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
 /// Top-level config. Missing tables fall back to their defaults.
@@ -19,6 +19,9 @@ pub struct Config {
     /// Translation call sites to look for. `[[calls]]` array.
     #[serde(default)]
     pub calls: Vec<CallSpec>,
+    /// `[guard]` — how dynamic-key fragments form keep-alive guards.
+    #[serde(default)]
+    pub guard: GuardCfg,
     #[serde(default)]
     pub output: Output,
     #[serde(default)]
@@ -78,8 +81,10 @@ pub struct CallSpec {
     /// Language this matcher applies to (`php`, `js`, `twig`, ...).
     pub lang: String,
     pub kind: CallKind,
-    /// Function / method / filter name — or, for `index`, the indexed object
-    /// identifier (`locale` in `locale['key']`).
+    /// What this matches, per `kind`:
+    /// - `function` / `method` / `filter` → the call/filter name (`i18n`, `get`);
+    /// - `index` → the indexed object identifier (`locale` in `locale['key']`),
+    ///   while the subscript carries the key.
     pub name: String,
     /// For `method`: allowed receivers (e.g. `["i18n", "this.i18n"]`). The `$`
     /// and `->`/`.` are normalized away by the extractor.
@@ -90,15 +95,33 @@ pub struct CallSpec {
     pub key_arg_index: usize,
 }
 
-/// `[output]` — reporting and exit-code policy.
+/// `[guard]` — classification tuning for dynamic-key guards. Lives outside
+/// `[output]` because it shapes *liveness* (which keys are Alive via a guard, and
+/// the audit skeleton tier), not reporting.
 #[derive(Debug, Deserialize)]
 #[serde(default)]
+pub struct GuardCfg {
+    /// Minimum static-fragment length that may form a guard (and the smallest
+    /// skeleton fragment the audit trusts).
+    pub min_len: usize,
+}
+
+impl Default for GuardCfg {
+    fn default() -> Self {
+        Self { min_len: 3 }
+    }
+}
+
+/// `[output]` — reporting and exit-code policy.
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
 pub struct Output {
-    pub mode: OutputMode,
     pub format: OutputFormat,
     pub fail_on: FailOn,
-    /// Minimum static-fragment length that may form a guard.
-    pub min_guard_len: usize,
+    /// Migration trap: `min_guard_len` moved to `[guard] min_len`. A value here is
+    /// rejected loudly by [`Config::load`] so the move is never silent (an ignored
+    /// key would revert the guard length to its default).
+    pub min_guard_len: Option<usize>,
     /// Dead-key budget (ratchet): fail only when the Dead bucket exceeds the cap.
     /// Absolute cap — fail when `dead_count > max_dead`. Mutually exclusive with
     /// `max_dead_ratio`. Absent → any dead fails (the historical default).
@@ -107,27 +130,6 @@ pub struct Output {
     /// `dead_count / total_keys > max_dead_ratio`. Mutually exclusive with
     /// `max_dead`.
     pub max_dead_ratio: Option<f64>,
-}
-
-impl Default for Output {
-    fn default() -> Self {
-        Self {
-            mode: OutputMode::default(),
-            format: OutputFormat::default(),
-            fail_on: FailOn::default(),
-            min_guard_len: 3,
-            max_dead: None,
-            max_dead_ratio: None,
-        }
-    }
-}
-
-/// Output mode. Only `review` exists in v1; deletion / export are future work.
-#[derive(Debug, Deserialize, Default, PartialEq, Eq, Clone, Copy)]
-#[serde(rename_all = "lowercase")]
-pub enum OutputMode {
-    #[default]
-    Review,
 }
 
 /// Report format.
@@ -168,6 +170,13 @@ impl Config {
             .with_context(|| format!("cannot read config file: {}", path.display()))?;
         let cfg: Config =
             toml::from_str(&text).with_context(|| format!("invalid config: {}", path.display()))?;
+        if cfg.output.min_guard_len.is_some() {
+            return Err(anyhow!(
+                "{}: `min_guard_len` moved from [output] to [guard] min_len — \
+                 update your config (a guard length is no longer an output knob)",
+                path.display()
+            ));
+        }
         Ok(cfg)
     }
 }
@@ -257,10 +266,9 @@ mod tests {
     #[test]
     fn defaults_apply_when_fields_missing() {
         let cfg: Config = toml::from_str("").expect("empty config is valid");
-        assert_eq!(cfg.output.min_guard_len, 3);
+        assert_eq!(cfg.guard.min_len, 3);
         assert_eq!(cfg.output.fail_on, FailOn::Dead);
         assert_eq!(cfg.output.format, OutputFormat::Text);
-        assert_eq!(cfg.output.mode, OutputMode::Review);
         assert_eq!(cfg.scan.source_roots, vec![".".to_string()]);
         // a [[calls]] entry without key_arg_index defaults to 0
         let cfg2: Config =
@@ -283,6 +291,33 @@ mod tests {
         let cfg: Config = toml::from_str("").unwrap();
         assert_eq!(cfg.output.max_dead, None);
         assert_eq!(cfg.output.max_dead_ratio, None);
+    }
+
+    /// `[guard] min_len` parses and overrides the default.
+    #[test]
+    fn guard_min_len_parses() {
+        let cfg: Config = toml::from_str("[guard]\nmin_len = 5").unwrap();
+        assert_eq!(cfg.guard.min_len, 5);
+        // Absent -> default 3.
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.guard.min_len, 3);
+    }
+
+    /// A config still carrying `[output] min_guard_len` is rejected loudly, so the
+    /// move to `[guard] min_len` is never a silent behaviour change.
+    #[test]
+    fn legacy_min_guard_len_is_loud_error() {
+        let dir = std::env::temp_dir().join("dead-poets-cfg-migrate");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dp.toml");
+        std::fs::write(&path, "[output]\nmin_guard_len = 4\n").unwrap();
+
+        let err = Config::load(&path).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("min_guard_len"), "names the moved key: {msg}");
+        assert!(msg.contains("[guard]"), "points to the new home: {msg}");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// `dead-or-blind` is a valid fail_on value (kebab-case mapping).
